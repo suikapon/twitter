@@ -1,0 +1,44 @@
+name: Daily Twitter Post
+
+on:
+  schedule:
+    # PRUEBA: se ejecuta cada 30 minutos. Cuando termines de probar,
+    # vuelve a poner algo como "0 14 * * *" para que sea 1 vez al día.
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}  # permite lanzarlo manualmente desde la pestaña "Actions"
+
+# Necesario para que el job pueda hacer commit y push del log actualizado
+permissions:
+  contents: write
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install tweepy
+
+      - name: Publicar en X
+        env:
+          TW_API_KEY: ${{ secrets.TW_API_KEY }}
+          TW_API_SECRET: ${{ secrets.TW_API_SECRET }}
+          TW_ACCESS_TOKEN: ${{ secrets.TW_ACCESS_TOKEN }}
+          TW_ACCESS_TOKEN_SECRET: ${{ secrets.TW_ACCESS_TOKEN_SECRET }}
+          TWEET_TEXT_TEMPLATE: ""  # opcional, ej: "Foto del día 📸 #miproyecto"
+        run: python post_daily.py
+
+      - name: Guardar registro de publicados
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add posted_log.json
+          git diff --staged --quiet || git commit -m "Actualiza registro de publicados"
+          git push
