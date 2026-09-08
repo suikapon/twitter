@@ -4,7 +4,11 @@ on:
   schedule:
     # Se ejecuta automáticamente cada 30 minutos
     - cron: '*/30 * * * *'
-  workflow_dispatch: # Permite ejecución manual desde la interfaz de GitHub
+  workflow_dispatch: # Permite ejecución manual desde GitHub
+
+# Permiso necesario para guardar los cambios en el archivo posted_log.json
+permissions:
+  contents: write
 
 jobs:
   post:
