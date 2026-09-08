@@ -2,8 +2,19 @@
 """
 post_daily.py
 
-Publica automáticamente en X (Twitter) un archivo (imagen o video)
-de la carpeta `media/`, y registra lo publicado en `posted_log.json`.
+Publica automáticamente en X (Twitter) el siguiente archivo pendiente
+(imagen o video) de la carpeta `media/`, y lleva registro de lo ya
+publicado en `posted_log.json` para no repetir contenido.
+
+Uso:
+    python post_daily.py
+
+Requiere las siguientes variables de entorno (ver README):
+    TW_API_KEY
+    TW_API_SECRET
+    TW_ACCESS_TOKEN
+    TW_ACCESS_TOKEN_SECRET
+    (opcional) TWEET_TEXT_TEMPLATE  -> texto que acompaña al tweet
 """
 
 import json
@@ -18,22 +29,32 @@ import tweepy
 MEDIA_DIR = Path("media")
 LOG_FILE = Path("posted_log.json")
 
+
+def today_str() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 VIDEO_EXTS = {".mp4", ".mov"}
 SUPPORTED_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
 
-def now_iso_str() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def load_posted_log() -> dict:
+    """
+    Devuelve un dict {nombre_archivo: "YYYY-MM-DD"} con la fecha (UTC)
+    de la última vez que se publicó cada archivo.
+
+    Es compatible con el formato viejo del log (una simple lista de
+    nombres, sin fechas): si detecta ese formato, lo convierte a un
+    dict vacío (todo vuelve a estar disponible) en vez de crashear.
+    """
     if LOG_FILE.exists():
-        try:
-            with open(LOG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data.get("posted", {})
-        except json.JSONDecodeError:
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        raw = data.get("posted", {})
+        if isinstance(raw, dict):
+            return raw
+        else:
+            print(f"[DEBUG] posted_log.json tenía formato viejo (lista), migrando a dict vacío.")
             return {}
     return {}
 
@@ -43,18 +64,29 @@ def save_posted_log(posted: dict) -> None:
         json.dump({"posted": posted}, f, indent=2, ensure_ascii=False, sort_keys=True)
 
 
-def get_next_file() -> Path | None:
+def get_next_file(posted: dict) -> Path | None:
     """
-    Selecciona al azar un archivo multimedia disponible en la carpeta media/.
+    Elige al AZAR un archivo (buscando también en subcarpetas dentro de
+    media/) entre los que NO se hayan publicado ya en el día de HOY (UTC).
+    Un archivo publicado ayer o antes vuelve a estar disponible.
+    Si todos los archivos ya se publicaron hoy, no hay nada que publicar.
     """
+    today = today_str()
     candidates = [
-        p for p in MEDIA_DIR.iterdir()
-        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
+        p for p in MEDIA_DIR.rglob("*")
+        if p.is_file()
+        and p.suffix.lower() in SUPPORTED_EXTS
+        and posted.get(str(p.relative_to(MEDIA_DIR))) != today
     ]
     return random.choice(candidates) if candidates else None
 
 
 def build_client_and_api():
+    """
+    tweepy.Client (API v2) se usa para crear el tweet.
+    tweepy.API (API v1.1) se sigue necesitando para subir media,
+    ya que la subida de media todavía no está 100% migrada a v2.
+    """
     api_key = os.environ["TW_API_KEY"]
     api_secret = os.environ["TW_API_SECRET"]
     access_token = os.environ["TW_ACCESS_TOKEN"]
@@ -79,6 +111,7 @@ def upload_media(api_v1: tweepy.API, filepath: Path) -> str:
     is_video = ext in VIDEO_EXTS
 
     if is_video:
+        # chunked=True es obligatorio para video/gif grandes
         media = api_v1.media_upload(filename=str(filepath), chunked=True, media_category="tweet_video")
     else:
         media = api_v1.media_upload(filename=str(filepath))
@@ -88,35 +121,43 @@ def upload_media(api_v1: tweepy.API, filepath: Path) -> str:
 
 def main():
     if not MEDIA_DIR.exists():
-        print(f"ERROR: No existe la carpeta '{MEDIA_DIR}'", file=sys.stderr)
+        print(f"ERROR: no existe la carpeta '{MEDIA_DIR}'", file=sys.stderr)
         sys.exit(1)
 
-    next_file = get_next_file()
+    posted = load_posted_log()
+
+    all_files = [
+        p for p in MEDIA_DIR.iterdir()
+        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
+    ]
+    today = today_str()
+    already_today = [p.name for p in all_files if posted.get(p.name) == today]
+
+    print(f"[DEBUG] Archivos totales válidos en media/: {len(all_files)}")
+    print(f"[DEBUG] Ya publicados HOY ({today}): {len(already_today)} -> {already_today[:10]}")
+    print(f"[DEBUG] Entradas totales en posted_log.json: {len(posted)}")
+
+    next_file = get_next_file(posted)
 
     if next_file is None:
-        print("No se encontraron archivos multimedia compatibles en la carpeta media/.")
+        print("Ya se publicó todo el contenido disponible por hoy (UTC). "
+              "Mañana vuelve a estar disponible.")
         sys.exit(0)
 
     print(f"Publicando: {next_file.name}")
 
-    try:
-        api_v1, client_v2 = build_client_and_api()
-        media_id = upload_media(api_v1, next_file)
+    api_v1, client_v2 = build_client_and_api()
 
-        text_template = os.environ.get("TWEET_TEXT_TEMPLATE", "")
-        tweet_text = text_template.format(filename=next_file.stem) if text_template else ""
+    media_id = upload_media(api_v1, next_file)
 
-        response = client_v2.create_tweet(text=tweet_text, media_ids=[media_id])
-        print("Tweet publicado con éxito:", response.data)
+    text_template = os.environ.get("TWEET_TEXT_TEMPLATE", "")
+    tweet_text = text_template.format(filename=next_file.stem) if text_template else ""
 
-        # Guarda la hora exacta de la última publicación
-        posted = load_posted_log()
-        posted[next_file.name] = now_iso_str()
-        save_posted_log(posted)
+    response = client_v2.create_tweet(text=tweet_text, media_ids=[media_id])
+    print("Tweet publicado:", response.data)
 
-    except Exception as e:
-        print(f"ERROR al publicar el tweet: {e}", file=sys.stderr)
-        sys.exit(1)
+    posted[next_file.name] = today_str()
+    save_posted_log(posted)
 
 
 if __name__ == "__main__":
