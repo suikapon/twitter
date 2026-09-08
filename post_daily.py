@@ -2,24 +2,15 @@
 """
 post_daily.py
 
-Publica automáticamente en X (Twitter) el siguiente archivo pendiente
-(imagen o video) de la carpeta `media/`, y lleva registro de lo ya
-publicado en `posted_log.json` para no repetir contenido.
-
-Uso:
-    python post_daily.py
-
-Requiere las siguientes variables de entorno (ver README):
-    TW_API_KEY
-    TW_API_SECRET
-    TW_ACCESS_TOKEN
-    TW_ACCESS_TOKEN_SECRET
-    (opcional) TWEET_TEXT_TEMPLATE  -> texto que acompaña al tweet
+Publica automáticamente en X (Twitter) un archivo (imagen o video)
+de la carpeta `media/`, y registra lo publicado en `posted_log.json`.
 """
 
 import json
 import os
+import random
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import tweepy
@@ -32,39 +23,38 @@ VIDEO_EXTS = {".mp4", ".mov"}
 SUPPORTED_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
 
-def load_posted_log() -> set:
-    """Devuelve el conjunto de nombres de archivo ya publicados."""
+def now_iso_str() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def load_posted_log() -> dict:
     if LOG_FILE.exists():
-        with open(LOG_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return set(data.get("posted", []))
-    return set()
+        try:
+            with open(LOG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("posted", {})
+        except json.JSONDecodeError:
+            return {}
+    return {}
 
 
-def save_posted_log(posted: set) -> None:
+def save_posted_log(posted: dict) -> None:
     with open(LOG_FILE, "w", encoding="utf-8") as f:
-        json.dump({"posted": sorted(posted)}, f, indent=2, ensure_ascii=False)
+        json.dump({"posted": posted}, f, indent=2, ensure_ascii=False, sort_keys=True)
 
 
-def get_next_file(posted: set) -> Path | None:
+def get_next_file() -> Path | None:
     """
-    Elige el siguiente archivo a publicar: el más antiguo (por nombre,
-    orden alfabético) que aún no esté en el log de publicados.
-    Cambia la función sorted() si prefieres orden aleatorio o por fecha.
+    Selecciona al azar un archivo multimedia disponible en la carpeta media/.
     """
-    candidates = sorted(
+    candidates = [
         p for p in MEDIA_DIR.iterdir()
-        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS and p.name not in posted
-    )
-    return candidates[0] if candidates else None
+        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
+    ]
+    return random.choice(candidates) if candidates else None
 
 
 def build_client_and_api():
-    """
-    tweepy.Client (API v2) se usa para crear el tweet.
-    tweepy.API (API v1.1) se sigue necesitando para subir media,
-    ya que la subida de media todavía no está 100% migrada a v2.
-    """
     api_key = os.environ["TW_API_KEY"]
     api_secret = os.environ["TW_API_SECRET"]
     access_token = os.environ["TW_ACCESS_TOKEN"]
@@ -89,7 +79,6 @@ def upload_media(api_v1: tweepy.API, filepath: Path) -> str:
     is_video = ext in VIDEO_EXTS
 
     if is_video:
-        # chunked=True es obligatorio para video/gif grandes
         media = api_v1.media_upload(filename=str(filepath), chunked=True, media_category="tweet_video")
     else:
         media = api_v1.media_upload(filename=str(filepath))
@@ -99,30 +88,35 @@ def upload_media(api_v1: tweepy.API, filepath: Path) -> str:
 
 def main():
     if not MEDIA_DIR.exists():
-        print(f"ERROR: no existe la carpeta '{MEDIA_DIR}'", file=sys.stderr)
+        print(f"ERROR: No existe la carpeta '{MEDIA_DIR}'", file=sys.stderr)
         sys.exit(1)
 
-    posted = load_posted_log()
-    next_file = get_next_file(posted)
+    next_file = get_next_file()
 
     if next_file is None:
-        print("No hay archivos pendientes por publicar en 'media/'.")
+        print("No se encontraron archivos multimedia compatibles en la carpeta media/.")
         sys.exit(0)
 
     print(f"Publicando: {next_file.name}")
 
-    api_v1, client_v2 = build_client_and_api()
+    try:
+        api_v1, client_v2 = build_client_and_api()
+        media_id = upload_media(api_v1, next_file)
 
-    media_id = upload_media(api_v1, next_file)
+        text_template = os.environ.get("TWEET_TEXT_TEMPLATE", "")
+        tweet_text = text_template.format(filename=next_file.stem) if text_template else ""
 
-    text_template = os.environ.get("TWEET_TEXT_TEMPLATE", "")
-    tweet_text = text_template.format(filename=next_file.stem) if text_template else ""
+        response = client_v2.create_tweet(text=tweet_text, media_ids=[media_id])
+        print("Tweet publicado con éxito:", response.data)
 
-    response = client_v2.create_tweet(text=tweet_text, media_ids=[media_id])
-    print("Tweet publicado:", response.data)
+        # Guarda la hora exacta de la última publicación
+        posted = load_posted_log()
+        posted[next_file.name] = now_iso_str()
+        save_posted_log(posted)
 
-    posted.add(next_file.name)
-    save_posted_log(posted)
+    except Exception as e:
+        print(f"ERROR al publicar el tweet: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
