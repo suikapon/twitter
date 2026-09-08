@@ -2,8 +2,9 @@ name: Daily Twitter Post
 
 on:
   schedule:
-    # Se ejecuta todos los días a las 14:00 UTC (ajusta la hora a tu gusto)
-    - cron: "0 14 * * *"
+    # PRUEBA: se ejecuta cada 30 minutos. Cuando termines de probar,
+    # vuelve a poner algo como "0 14 * * *" para que sea 1 vez al día.
+    - cron: "*/30 * * * *"
   workflow_dispatch: {}  # permite lanzarlo manualmente desde la pestaña "Actions"
 
 # Necesario para que el job pueda hacer commit y push del log actualizado
