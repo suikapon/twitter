@@ -10,6 +10,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: daily-post
+  cancel-in-progress: false
+
 jobs:
   post:
     runs-on: ubuntu-latest
@@ -44,6 +48,7 @@ jobs:
 
             git add posted_log.json
             git diff --staged --quiet || git commit -m "Actualiza registro de publicados ($i)"
+            git pull --rebase origin main || echo "pull --rebase falló, se intenta push igual"
             git push || echo "push falló, se reintentará en la próxima publicación"
 
             if [ "$i" -lt 11 ]; then
