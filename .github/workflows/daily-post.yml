@@ -2,11 +2,11 @@ name: Daily Twitter Post
 
 on:
   schedule:
-    # Se ejecuta cada 30 minutos, de forma permanente.
-    - cron: "*/30 * * * *"
-  workflow_dispatch: {}  # permite lanzarlo manualmente desde la pestaña "Actions"
+    # Se dispara cada 6 horas (esto SÍ es confiable en GitHub).
+    # Dentro del job, publica en bucle cada 30 min durante ~5.5 horas.
+    - cron: "0 */6 * * *"
+  workflow_dispatch: {}
 
-# Necesario para que el job pueda hacer commit y push del log actualizado
 permissions:
   contents: write
 
@@ -25,19 +25,29 @@ jobs:
       - name: Instalar dependencias
         run: pip install tweepy
 
-      - name: Publicar en X
+      - name: Bucle de publicaciones cada 30 min
         env:
           TW_API_KEY: ${{ secrets.TW_API_KEY }}
           TW_API_SECRET: ${{ secrets.TW_API_SECRET }}
           TW_ACCESS_TOKEN: ${{ secrets.TW_ACCESS_TOKEN }}
           TW_ACCESS_TOKEN_SECRET: ${{ secrets.TW_ACCESS_TOKEN_SECRET }}
-          TWEET_TEXT_TEMPLATE: ""  # opcional, ej: "Foto del día 📸 #miproyecto"
-        run: python post_daily.py
-
-      - name: Guardar registro de publicados
+          TWEET_TEXT_TEMPLATE: ""
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add posted_log.json
-          git diff --staged --quiet || git commit -m "Actualiza registro de publicados"
-          git push
+
+          # 11 publicaciones separadas por 30 min = ~5.5 horas cubiertas,
+          # dejando margen antes de que este job se reinicie cada 6 horas.
+          for i in $(seq 1 11); do
+            echo "=== Publicación $i de 11 ==="
+            python post_daily.py
+
+            git add posted_log.json
+            git diff --staged --quiet || git commit -m "Actualiza registro de publicados ($i)"
+            git push || echo "push falló, se reintentará en la próxima publicación"
+
+            if [ "$i" -lt 11 ]; then
+              echo "Esperando 30 minutos..."
+              sleep 1800
+            fi
+          done
