@@ -55,8 +55,8 @@ jobs:
             git push || echo "push falló, se reintentará en la próxima publicación"
 
             if [ "$i" -lt 11 ]; then
-              echo "Esperando 30 minutos..."
-              sleep 1800
+              echo "Esperando 45 minutos..."
+              sleep 2700
             fi
           done
 
