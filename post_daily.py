@@ -119,9 +119,11 @@ def build_clients():
 def upload_media(api_v1: tweepy.API, filepath: Path) -> str:
     is_video = filepath.suffix.lower() in VIDEO_EXTS
     if is_video:
-        # chunked=True es obligatorio para video/gif grandes
+        # "amplify_video" (en vez de "tweet_video") permite videos largos
+        # en cuentas Premium. chunked=True es obligatorio para archivos
+        # grandes.
         media = api_v1.media_upload(
-            filename=str(filepath), chunked=True, media_category="tweet_video"
+            filename=str(filepath), chunked=True, media_category="amplify_video"
         )
     else:
         media = api_v1.media_upload(filename=str(filepath))
