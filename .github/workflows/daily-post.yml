@@ -44,7 +44,7 @@ jobs:
           # dejando margen antes de que este job se reinicie cada 6 horas.
           for i in $(seq 1 11); do
             echo "=== Publicación $i de 11 ==="
-            python post_daily.py
+            python post_daily.py || echo "Esta publicación falló, se continúa con la siguiente"
 
             git add posted_log.json
             git diff --staged --quiet || git commit -m "Actualiza registro de publicados ($i)"
