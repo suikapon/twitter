@@ -52,7 +52,7 @@ jobs:
 
             python post_scheduled.py || echo "Esta revisión tuvo un error, se continúa con la siguiente"
 
-            git add scheduled_log.json
+            git add scheduled_log.json 2>/dev/null || true
             git diff --staged --quiet || git commit -m "Actualiza registro de posts programados ($i)"
 
             if ! git push; then
