@@ -39,6 +39,15 @@ def today_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def days_since(date_str: str) -> int:
+    """Días transcurridos desde date_str (YYYY-MM-DD) hasta hoy, en UTC."""
+    try:
+        posted_date = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return 9999  # fecha inválida -> lo tratamos como "hace mucho"
+    return (datetime.now(timezone.utc) - posted_date).days
+
+
 def load_posted_log() -> dict:
     """
     Devuelve un dict {ruta_relativa: "YYYY-MM-DD"} con la fecha (UTC) de
@@ -82,14 +91,19 @@ def file_key(p: Path) -> str:
     return str(p.relative_to(MEDIA_DIR))
 
 
+REPEAT_COOLDOWN_DAYS = 30
+
+
 def pick_random_file(all_files: list[Path], posted: dict) -> Path | None:
     """
-    Elige al AZAR un archivo entre los que NO se hayan publicado ya en
-    el día de HOY (UTC). Un archivo publicado ayer o antes vuelve a
-    estar disponible. Si todos ya se publicaron hoy, devuelve None.
+    Elige al AZAR un archivo entre los que NO se hayan publicado en los
+    últimos REPEAT_COOLDOWN_DAYS días. Si todos se publicaron dentro de
+    ese período, devuelve None.
     """
-    today = today_str()
-    candidates = [p for p in all_files if posted.get(file_key(p)) != today]
+    candidates = [
+        p for p in all_files
+        if days_since(posted.get(file_key(p), "2000-01-01")) >= REPEAT_COOLDOWN_DAYS
+    ]
     return random.choice(candidates) if candidates else None
 
 
@@ -143,10 +157,13 @@ def main() -> int:
     posted = load_posted_log()
     all_files = list_all_media()
     today = today_str()
-    already_today = sum(1 for p in all_files if posted.get(file_key(p)) == today)
+    en_cooldown = sum(
+        1 for p in all_files
+        if days_since(posted.get(file_key(p), "2000-01-01")) < REPEAT_COOLDOWN_DAYS
+    )
 
     print(f"[INFO] Archivos válidos en media/: {len(all_files)}")
-    print(f"[INFO] Ya publicados hoy ({today}): {already_today}")
+    print(f"[INFO] En cooldown (publicados hace menos de {REPEAT_COOLDOWN_DAYS} días): {en_cooldown}")
 
     if not all_files:
         print("No hay ningún archivo válido dentro de 'media/'. Nada que publicar.")
@@ -154,7 +171,8 @@ def main() -> int:
 
     next_file = pick_random_file(all_files, posted)
     if next_file is None:
-        print("Ya se publicó todo el contenido disponible por hoy (UTC).")
+        print(f"Todo el contenido disponible se publicó en los últimos "
+              f"{REPEAT_COOLDOWN_DAYS} días. Nada nuevo que publicar por ahora.")
         return 0
 
     print(f"[INFO] Publicando: {next_file}")
