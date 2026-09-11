@@ -29,6 +29,11 @@ import tweepy
 
 MEDIA_DIR = Path("media")
 LOG_FILE = Path("posted_log.json")
+ROTATION_FILE = Path("rotation_state.json")
+
+# Carpetas entre las que se alterna: una publicación de la primera,
+# luego una de la segunda, luego otra vez la primera, etc.
+CATEGORIES = ["deltarune", "shitpost"]
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 VIDEO_EXTS = {".mp4", ".mov"}
@@ -78,6 +83,35 @@ def save_posted_log(posted: dict) -> None:
         json.dump({"posted": posted}, f, indent=2, ensure_ascii=False, sort_keys=True)
 
 
+def load_rotation_state() -> str:
+    """Devuelve la categoría que le toca publicar ahora. Por defecto, la primera."""
+    if ROTATION_FILE.exists():
+        try:
+            with open(ROTATION_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            cat = data.get("next_category")
+            if cat in CATEGORIES:
+                return cat
+        except (json.JSONDecodeError, OSError):
+            pass
+    return CATEGORIES[0]
+
+
+def save_rotation_state(next_category: str) -> None:
+    with open(ROTATION_FILE, "w", encoding="utf-8") as f:
+        json.dump({"next_category": next_category}, f, indent=2, ensure_ascii=False)
+
+
+def list_media_in_category(category: str) -> list[Path]:
+    folder = MEDIA_DIR / category
+    if not folder.exists():
+        return []
+    return [
+        p for p in folder.rglob("*")
+        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
+    ]
+
+
 def list_all_media() -> list[Path]:
     """Todos los archivos válidos dentro de media/, incluyendo subcarpetas."""
     return [
@@ -94,17 +128,30 @@ def file_key(p: Path) -> str:
 REPEAT_COOLDOWN_DAYS = 30
 
 
-def pick_random_file(all_files: list[Path], posted: dict) -> Path | None:
+def pick_next_file(posted: dict) -> tuple[Path | None, str | None]:
     """
-    Elige al AZAR un archivo entre los que NO se hayan publicado en los
-    últimos REPEAT_COOLDOWN_DAYS días. Si todos se publicaron dentro de
-    ese período, devuelve None.
+    Elige un archivo respetando la alternancia entre CATEGORIES: primero
+    intenta la categoría que le toca según rotation_state.json. Si esa
+    categoría no tiene ningún candidato disponible (todo en cooldown, o
+    la carpeta está vacía), cae de respaldo a la otra categoría para no
+    dejar de publicar.
+
+    Devuelve (archivo_elegido, categoría_realmente_usada), o (None, None)
+    si no hay absolutamente nada disponible en ninguna de las dos.
     """
-    candidates = [
-        p for p in all_files
-        if days_since(posted.get(file_key(p), "2000-01-01")) >= REPEAT_COOLDOWN_DAYS
-    ]
-    return random.choice(candidates) if candidates else None
+    preferred = load_rotation_state()
+    other = [c for c in CATEGORIES if c != preferred][0] if len(CATEGORIES) > 1 else preferred
+
+    for category in (preferred, other):
+        files = list_media_in_category(category)
+        candidates = [
+            p for p in files
+            if days_since(posted.get(file_key(p), "2000-01-01")) >= REPEAT_COOLDOWN_DAYS
+        ]
+        if candidates:
+            return random.choice(candidates), category
+
+    return None, None
 
 
 def build_clients():
@@ -164,18 +211,21 @@ def main() -> int:
 
     print(f"[INFO] Archivos válidos en media/: {len(all_files)}")
     print(f"[INFO] En cooldown (publicados hace menos de {REPEAT_COOLDOWN_DAYS} días): {en_cooldown}")
+    for cat in CATEGORIES:
+        print(f"[INFO]   - {cat}/: {len(list_media_in_category(cat))} archivo(s)")
+    print(f"[INFO] Le toca a la categoría: {load_rotation_state()}")
 
     if not all_files:
         print("No hay ningún archivo válido dentro de 'media/'. Nada que publicar.")
         return 0
 
-    next_file = pick_random_file(all_files, posted)
+    next_file, used_category = pick_next_file(posted)
     if next_file is None:
-        print(f"Todo el contenido disponible se publicó en los últimos "
-              f"{REPEAT_COOLDOWN_DAYS} días. Nada nuevo que publicar por ahora.")
+        print(f"Todo el contenido disponible (en ambas carpetas) se publicó en los "
+              f"últimos {REPEAT_COOLDOWN_DAYS} días. Nada nuevo que publicar por ahora.")
         return 0
 
-    print(f"[INFO] Publicando: {next_file}")
+    print(f"[INFO] Publicando ({used_category}): {next_file}")
 
     try:
         api_v1, client_v2 = build_clients()
@@ -195,6 +245,11 @@ def main() -> int:
     # Solo actualizamos el log si la publicación fue exitosa.
     posted[file_key(next_file)] = today
     save_posted_log(posted)
+
+    # La próxima vez le toca a la otra categoría (alternancia).
+    next_category = [c for c in CATEGORIES if c != used_category][0] if len(CATEGORIES) > 1 else used_category
+    save_rotation_state(next_category)
+
     return 0
 
 
