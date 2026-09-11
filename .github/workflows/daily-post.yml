@@ -32,7 +32,7 @@ jobs:
       - name: Instalar dependencias
         run: pip install tweepy
 
-      - name: Bucle de publicaciones cada 30 min
+      - name: Bucle de publicaciones cada 45 min
         env:
           TW_API_KEY: ${{ secrets.TW_API_KEY }}
           TW_API_SECRET: ${{ secrets.TW_API_SECRET }}
@@ -43,18 +43,37 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # 11 publicaciones separadas por 30 min = ~5.5 horas cubiertas,
-          # dejando margen antes de que este job se reinicie cada 6 horas.
-          for i in $(seq 1 11); do
-            echo "=== Publicación $i de 11 ==="
+          # 8 publicaciones separadas por 45 min = ~5.25 horas cubiertas,
+          # dejando margen antes del límite de 6h de GitHub Actions.
+          for i in $(seq 1 8); do
+            echo "=== Publicación $i de 8 ==="
+
+            # Sincroniza con el remoto ANTES de decidir qué publicar,
+            # para partir siempre del registro más actualizado y reducir
+            # el riesgo de conflicto al guardar después.
+            git pull --rebase origin main || {
+              echo "pull --rebase falló, se aborta y se sincroniza a la fuerza"
+              git rebase --abort 2>/dev/null || true
+              git checkout main 2>/dev/null || true
+              git reset --hard origin/main
+            }
+
             python post_daily.py || echo "Esta publicación falló, se continúa con la siguiente"
 
             git add posted_log.json
             git diff --staged --quiet || git commit -m "Actualiza registro de publicados ($i)"
-            git pull --rebase origin main || echo "pull --rebase falló, se intenta push igual"
-            git push || echo "push falló, se reintentará en la próxima publicación"
 
-            if [ "$i" -lt 11 ]; then
+            if ! git push; then
+              echo "push falló, se reintenta una vez tras resincronizar"
+              git pull --rebase origin main || {
+                git rebase --abort 2>/dev/null || true
+                git checkout main 2>/dev/null || true
+                git reset --hard origin/main
+              }
+              git push || echo "push volvió a fallar, se reintentará en la próxima publicación"
+            fi
+
+            if [ "$i" -lt 8 ]; then
               echo "Esperando 45 minutos..."
               sleep 2700
             fi
