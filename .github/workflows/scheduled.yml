@@ -1,0 +1,82 @@
+name: Scheduled Posts
+
+on:
+  schedule:
+    # Red de seguridad por si la cadena de auto-disparo se corta.
+    - cron: "0 */6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: scheduled-post
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install tweepy
+
+      - name: Revisar posts programados cada 15 min
+        env:
+          TW_API_KEY: ${{ secrets.TW_API_KEY }}
+          TW_API_SECRET: ${{ secrets.TW_API_SECRET }}
+          TW_ACCESS_TOKEN: ${{ secrets.TW_ACCESS_TOKEN }}
+          TW_ACCESS_TOKEN_SECRET: ${{ secrets.TW_ACCESS_TOKEN_SECRET }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 20 revisiones separadas por 15 min = ~5 horas cubiertas,
+          # dejando margen antes del límite de 6h de GitHub Actions.
+          for i in $(seq 1 20); do
+            echo "=== Revisión $i de 20 ==="
+
+            git pull --rebase origin main || {
+              git rebase --abort 2>/dev/null || true
+              git checkout main 2>/dev/null || true
+              git reset --hard origin/main
+            }
+
+            python post_scheduled.py || echo "Esta revisión tuvo un error, se continúa con la siguiente"
+
+            git add scheduled_log.json
+            git diff --staged --quiet || git commit -m "Actualiza registro de posts programados ($i)"
+
+            if ! git push; then
+              git pull --rebase origin main || {
+                git rebase --abort 2>/dev/null || true
+                git checkout main 2>/dev/null || true
+                git reset --hard origin/main
+              }
+              git push || echo "push volvió a fallar, se reintentará en la próxima revisión"
+            fi
+
+            if [ "$i" -lt 20 ]; then
+              sleep 900
+            fi
+          done
+
+      - name: Encadenar la siguiente ejecución (sin esperar al cron)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/scheduled-post.yml/dispatches" \
+            -d '{"ref":"main"}'
+          echo "Siguiente ejecución disparada."
