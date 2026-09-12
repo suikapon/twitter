@@ -139,6 +139,13 @@ def file_key(p: Path) -> str:
 
 REPEAT_COOLDOWN_DAYS = 30
 
+# Cooldown específico por categoría (sobreescribe REPEAT_COOLDOWN_DAYS).
+# None = nunca se repite (una vez publicado, queda excluido para siempre).
+CATEGORY_COOLDOWN_DAYS = {
+    "deltarune": 30,
+    "shitpost": None,
+}
+
 
 def pick_next_file(posted: dict) -> tuple[Path | None, str | None]:
     """
@@ -156,10 +163,17 @@ def pick_next_file(posted: dict) -> tuple[Path | None, str | None]:
 
     for category in (preferred, other):
         files = list_media_in_category(category)
-        candidates = [
-            p for p in files
-            if days_since(posted.get(file_key(p), "2000-01-01")) >= REPEAT_COOLDOWN_DAYS
-        ]
+        cooldown = CATEGORY_COOLDOWN_DAYS.get(category, REPEAT_COOLDOWN_DAYS)
+
+        if cooldown is None:
+            # Nunca se repite: cualquier archivo ya presente en el log queda excluido para siempre.
+            candidates = [p for p in files if file_key(p) not in posted]
+        else:
+            candidates = [
+                p for p in files
+                if days_since(posted.get(file_key(p), "2000-01-01")) >= cooldown
+            ]
+
         if candidates:
             return random.choice(candidates), category
 
@@ -342,15 +356,20 @@ def main() -> int:
     posted = load_posted_log()
     all_files = list_all_media()
     today = today_str()
-    en_cooldown = sum(
-        1 for p in all_files
-        if days_since(posted.get(file_key(p), "2000-01-01")) < REPEAT_COOLDOWN_DAYS
-    )
 
     print(f"[INFO] Archivos válidos en media/: {len(all_files)}")
-    print(f"[INFO] En cooldown (publicados hace menos de {REPEAT_COOLDOWN_DAYS} días): {en_cooldown}")
     for cat in CATEGORIES:
-        print(f"[INFO]   - {cat}/: {len(list_media_in_category(cat))} archivo(s)")
+        cat_files = list_media_in_category(cat)
+        cooldown = CATEGORY_COOLDOWN_DAYS.get(cat, REPEAT_COOLDOWN_DAYS)
+        if cooldown is None:
+            disponibles = sum(1 for p in cat_files if file_key(p) not in posted)
+            print(f"[INFO]   - {cat}/: {len(cat_files)} archivo(s), {disponibles} disponible(s) (nunca se repite)")
+        else:
+            disponibles = sum(
+                1 for p in cat_files
+                if days_since(posted.get(file_key(p), "2000-01-01")) >= cooldown
+            )
+            print(f"[INFO]   - {cat}/: {len(cat_files)} archivo(s), {disponibles} disponible(s) (cooldown {cooldown} días)")
     print(f"[INFO] Le toca a la categoría: {load_rotation_state()}")
 
     if not all_files:
@@ -359,8 +378,8 @@ def main() -> int:
 
     next_file, used_category = pick_next_file(posted)
     if next_file is None:
-        print(f"Todo el contenido disponible (en ambas carpetas) se publicó en los "
-              f"últimos {REPEAT_COOLDOWN_DAYS} días. Nada nuevo que publicar por ahora.")
+        print("No hay contenido disponible en ninguna categoría ahora mismo "
+              "(cooldown activo o agotado). Nada que publicar.")
         return 0
 
     print(f"[INFO] Publicando ({used_category}): {next_file}")
