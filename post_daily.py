@@ -30,13 +30,18 @@ import tweepy
 MEDIA_DIR = Path("media")
 LOG_FILE = Path("posted_log.json")
 ROTATION_FILE = Path("rotation_state.json")
+YOUTUBE_LOG_FILE = Path("youtube_log.json")
 
 # Carpetas entre las que se alterna: una publicación de la primera,
 # luego una de la segunda, luego otra vez la primera, etc.
 CATEGORIES = ["deltarune", "shitpost"]
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
-VIDEO_EXTS = {".mp4", ".mov"}
+VIDEO_EXTS = {
+    ".mp4", ".mov", ".avi", ".wmv", ".flv", ".webm",
+    ".mkv", ".m4v", ".3gp", ".3g2", ".mpg", ".mpeg", ".ts",
+}
+YOUTUBE_VIDEO_EXTS = {".mp4"}  # YouTube solo recibe mp4, aunque Twitter acepte más formatos
 SUPPORTED_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
 
@@ -191,7 +196,131 @@ def upload_media(api_v1: tweepy.API, filepath: Path) -> str:
     return media.media_id_string
 
 
-def main() -> int:
+YOUTUBE_DAILY_LIMIT_PER_CATEGORY = 3
+
+
+def load_youtube_log() -> dict:
+    """
+    {'date': 'YYYY-MM-DD', 'counts': {'deltarune': N, 'shitpost': N},
+     'last_upload_utc': ISO8601 o None}
+    """
+    today = today_str()
+    if YOUTUBE_LOG_FILE.exists():
+        try:
+            with open(YOUTUBE_LOG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("date") == today:
+                data.setdefault("last_upload_utc", None)
+                data.setdefault("counts", {})
+                for cat in CATEGORIES:
+                    data["counts"].setdefault(cat, 0)
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"date": today, "counts": {cat: 0 for cat in CATEGORIES}, "last_upload_utc": None}
+
+
+def save_youtube_log(data: dict) -> None:
+    with open(YOUTUBE_LOG_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def youtube_credentials_available() -> bool:
+    return all(
+        os.environ.get(var)
+        for var in ("YT_CLIENT_ID", "YT_CLIENT_SECRET", "YT_REFRESH_TOKEN")
+    )
+
+
+def upload_to_youtube(filepath: Path, title: str) -> str:
+    """Sube un video a YouTube como Short público. Devuelve el video_id."""
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload
+
+    creds = Credentials(
+        None,
+        refresh_token=os.environ["YT_REFRESH_TOKEN"],
+        client_id=os.environ["YT_CLIENT_ID"],
+        client_secret=os.environ["YT_CLIENT_SECRET"],
+        token_uri="https://oauth2.googleapis.com/token",
+    )
+    youtube = build("youtube", "v3", credentials=creds)
+
+    body = {
+        "snippet": {
+            "title": title[:100],
+            "description": f"{title}\n\n#Shorts",
+            "categoryId": "24",  # Entertainment
+        },
+        "status": {"privacyStatus": "public"},
+    }
+    media = MediaFileUpload(str(filepath), chunksize=-1, resumable=True)
+    request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+
+    response = None
+    while response is None:
+        _, response = request.next_chunk()
+    return response["id"]
+
+
+YOUTUBE_MIN_HOURS_BETWEEN_UPLOADS = 4
+
+
+def hours_since_last_youtube_upload(yt_log: dict) -> float:
+    last = yt_log.get("last_upload_utc")
+    if not last:
+        return 9999  # nunca se subió nada -> se permite
+    try:
+        last_dt = datetime.fromisoformat(last)
+    except ValueError:
+        return 9999
+    return (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+
+
+def maybe_upload_to_youtube(filepath: Path, category: str) -> None:
+    """
+    Sube a YouTube si: es un .mp4 (YouTube solo recibe ese formato aquí),
+    hay credenciales, esa categoría ('deltarune'/'shitpost') no llegó a
+    su cupo diario de YOUTUBE_DAILY_LIMIT_PER_CATEGORY, y ya pasaron al
+    menos YOUTUBE_MIN_HOURS_BETWEEN_UPLOADS horas desde la última subida
+    (para repartirlas a lo largo del día en vez de subirlas todas seguidas).
+    """
+    if filepath.suffix.lower() not in YOUTUBE_VIDEO_EXTS:
+        print(f"[INFO] YouTube: solo se suben archivos {YOUTUBE_VIDEO_EXTS}, se omite.")
+        return
+
+    if not youtube_credentials_available():
+        print("[INFO] YouTube: faltan credenciales (YT_CLIENT_ID / YT_CLIENT_SECRET / "
+              "YT_REFRESH_TOKEN), se omite la subida.")
+        return
+
+    yt_log = load_youtube_log()
+    current_count = yt_log["counts"].get(category, 0)
+
+    if current_count >= YOUTUBE_DAILY_LIMIT_PER_CATEGORY:
+        print(f"[INFO] YouTube: cupo diario de '{category}' alcanzado "
+              f"({current_count}/{YOUTUBE_DAILY_LIMIT_PER_CATEGORY}), se omite.")
+        return
+
+    hours_since = hours_since_last_youtube_upload(yt_log)
+    if hours_since < YOUTUBE_MIN_HOURS_BETWEEN_UPLOADS:
+        faltan = YOUTUBE_MIN_HOURS_BETWEEN_UPLOADS - hours_since
+        print(f"[INFO] YouTube: última subida hace {hours_since:.1f}h, "
+              f"faltan {faltan:.1f}h para la próxima. Se omite por ahora.")
+        return
+
+    try:
+        video_id = upload_to_youtube(filepath, filepath.stem)
+        print(f"[OK] Subido a YouTube ({category}): https://youtu.be/{video_id}")
+        yt_log["counts"][category] = current_count + 1
+        yt_log["last_upload_utc"] = datetime.now(timezone.utc).isoformat()
+        save_youtube_log(yt_log)
+    except Exception as e:
+        print(f"[WARN] Falló la subida a YouTube (no afecta al post de Twitter): {e}")
+
+
+
     if not MEDIA_DIR.exists():
         print(f"ERROR: no existe la carpeta '{MEDIA_DIR}'", file=sys.stderr)
         return 1
@@ -236,6 +365,7 @@ def main() -> int:
 
         response = client_v2.create_tweet(text=tweet_text, media_ids=[media_id])
         print("[OK] Tweet publicado:", response.data)
+        maybe_upload_to_youtube(next_file, used_category)
     except Exception as e:
         # Si algo falla al publicar, NO marcamos el archivo como publicado,
         # para que el próximo intento (en 30 min) lo vuelva a probar.

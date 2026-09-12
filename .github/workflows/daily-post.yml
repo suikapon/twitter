@@ -30,7 +30,7 @@ jobs:
           python-version: "3.11"
 
       - name: Instalar dependencias
-        run: pip install tweepy
+        run: pip install tweepy google-api-python-client google-auth-oauthlib google-auth-httplib2
 
       - name: Bucle de publicaciones cada 45 min
         env:
@@ -39,6 +39,9 @@ jobs:
           TW_ACCESS_TOKEN: ${{ secrets.TW_ACCESS_TOKEN }}
           TW_ACCESS_TOKEN_SECRET: ${{ secrets.TW_ACCESS_TOKEN_SECRET }}
           TWEET_TEXT_TEMPLATE: ""
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -60,7 +63,7 @@ jobs:
 
             python post_daily.py || echo "Esta publicación falló, se continúa con la siguiente"
 
-            git add posted_log.json rotation_state.json 2>/dev/null || git add posted_log.json
+            git add posted_log.json rotation_state.json youtube_log.json 2>/dev/null || git add posted_log.json
             git diff --staged --quiet || git commit -m "Actualiza registro de publicados ($i)"
 
             if ! git push; then
