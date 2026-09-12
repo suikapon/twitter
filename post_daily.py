@@ -42,6 +42,13 @@ VIDEO_EXTS = {
     ".mkv", ".m4v", ".3gp", ".3g2", ".mpg", ".mpeg", ".ts",
 }
 YOUTUBE_VIDEO_EXTS = {".mp4"}  # YouTube solo recibe mp4, aunque Twitter acepte más formatos
+
+# Título fijo por categoría para los Shorts de YouTube (en vez de usar el
+# nombre del archivo, que suele ser un hash sin sentido).
+YOUTUBE_TITLES = {
+    "deltarune": "Deltarune #shorts #deltarune",
+    "shitpost": "Shitpost #shorts #memes",
+}
 SUPPORTED_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
 
@@ -311,7 +318,8 @@ def maybe_upload_to_youtube(filepath: Path, category: str) -> None:
         return
 
     try:
-        video_id = upload_to_youtube(filepath, filepath.stem)
+        title = YOUTUBE_TITLES.get(category, category)
+        video_id = upload_to_youtube(filepath, title)
         print(f"[OK] Subido a YouTube ({category}): https://youtu.be/{video_id}")
         yt_log["counts"][category] = current_count + 1
         yt_log["last_upload_utc"] = datetime.now(timezone.utc).isoformat()
