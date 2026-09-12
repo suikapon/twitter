@@ -321,6 +321,7 @@ def maybe_upload_to_youtube(filepath: Path, category: str) -> None:
 
 
 
+def main() -> int:
     if not MEDIA_DIR.exists():
         print(f"ERROR: no existe la carpeta '{MEDIA_DIR}'", file=sys.stderr)
         return 1
