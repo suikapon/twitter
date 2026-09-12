@@ -147,13 +147,17 @@ CATEGORY_COOLDOWN_DAYS = {
 }
 
 
-def pick_next_file(posted: dict) -> tuple[Path | None, str | None]:
+def pick_next_file(posted: dict, force_video_only: bool = False) -> tuple[Path | None, str | None]:
     """
     Elige un archivo respetando la alternancia entre CATEGORIES: primero
     intenta la categoría que le toca según rotation_state.json. Si esa
     categoría no tiene ningún candidato disponible (todo en cooldown, o
     la carpeta está vacía), cae de respaldo a la otra categoría para no
     dejar de publicar.
+
+    Si force_video_only=True, solo se consideran archivos .mp4 (se usa
+    cuando toca el turno de subir a YouTube, para garantizar que el
+    archivo elegido sea compatible).
 
     Devuelve (archivo_elegido, categoría_realmente_usada), o (None, None)
     si no hay absolutamente nada disponible en ninguna de las dos.
@@ -163,6 +167,9 @@ def pick_next_file(posted: dict) -> tuple[Path | None, str | None]:
 
     for category in (preferred, other):
         files = list_media_in_category(category)
+        if force_video_only:
+            files = [p for p in files if p.suffix.lower() in YOUTUBE_VIDEO_EXTS]
+
         cooldown = CATEGORY_COOLDOWN_DAYS.get(category, REPEAT_COOLDOWN_DAYS)
 
         if cooldown is None:
@@ -343,6 +350,23 @@ def maybe_upload_to_youtube(filepath: Path, category: str) -> None:
 
 
 
+def is_youtube_turn_due() -> bool:
+    """
+    True si: hay credenciales, ya pasaron las 4h desde la última subida,
+    y al menos una categoría todavía no llegó a su cupo diario. En ese
+    caso, el turno de publicación debe forzar un .mp4.
+    """
+    if not youtube_credentials_available():
+        return False
+    yt_log = load_youtube_log()
+    if hours_since_last_youtube_upload(yt_log) < YOUTUBE_MIN_HOURS_BETWEEN_UPLOADS:
+        return False
+    return any(
+        yt_log["counts"].get(cat, 0) < YOUTUBE_DAILY_LIMIT_PER_CATEGORY
+        for cat in CATEGORIES
+    )
+
+
 def main() -> int:
     if not MEDIA_DIR.exists():
         print(f"ERROR: no existe la carpeta '{MEDIA_DIR}'", file=sys.stderr)
@@ -376,7 +400,15 @@ def main() -> int:
         print("No hay ningún archivo válido dentro de 'media/'. Nada que publicar.")
         return 0
 
-    next_file, used_category = pick_next_file(posted)
+    youtube_turn = is_youtube_turn_due()
+    if youtube_turn:
+        print("[INFO] Toca turno de YouTube: se forzará elegir un .mp4.")
+
+    next_file, used_category = pick_next_file(posted, force_video_only=youtube_turn)
+    if next_file is None and youtube_turn:
+        print("[INFO] No había ningún .mp4 disponible para el turno de YouTube, "
+              "se elige contenido normal en su lugar.")
+        next_file, used_category = pick_next_file(posted, force_video_only=False)
     if next_file is None:
         print("No hay contenido disponible en ninguna categoría ahora mismo "
               "(cooldown activo o agotado). Nada que publicar.")
