@@ -34,7 +34,7 @@ YOUTUBE_LOG_FILE = Path("youtube_log.json")
 
 # Carpetas entre las que se alterna: una publicación de la primera,
 # luego una de la segunda, luego otra vez la primera, etc.
-CATEGORIES = ["deltarune", "shitpost"]
+CATEGORIES = ["deltarune", "shitpost", "touhou"]
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 VIDEO_EXTS = {
@@ -48,6 +48,7 @@ YOUTUBE_VIDEO_EXTS = {".mp4"}  # YouTube solo recibe mp4, aunque Twitter acepte 
 YOUTUBE_TITLES = {
     "deltarune": "Deltarune #shorts #deltarune",
     "shitpost": "Shitpost #shorts #memes",
+    "touhou": "Touhou #shorts #touhou",
 }
 SUPPORTED_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
@@ -144,28 +145,33 @@ REPEAT_COOLDOWN_DAYS = 30
 CATEGORY_COOLDOWN_DAYS = {
     "deltarune": 30,
     "shitpost": None,
+    "touhou": 30,
 }
 
 
 def pick_next_file(posted: dict, force_video_only: bool = False) -> tuple[Path | None, str | None]:
     """
-    Elige un archivo respetando la alternancia entre CATEGORIES: primero
+    Elige un archivo siguiendo el ciclo fijo de CATEGORIES (en el orden
+    de la lista, volviendo al inicio al llegar al final). Primero
     intenta la categoría que le toca según rotation_state.json. Si esa
     categoría no tiene ningún candidato disponible (todo en cooldown, o
-    la carpeta está vacía), cae de respaldo a la otra categoría para no
-    dejar de publicar.
+    la carpeta está vacía), cae de respaldo a la siguiente en el ciclo,
+    y así sucesivamente, para no dejar de publicar.
 
     Si force_video_only=True, solo se consideran archivos .mp4 (se usa
     cuando toca el turno de subir a YouTube, para garantizar que el
     archivo elegido sea compatible).
 
     Devuelve (archivo_elegido, categoría_realmente_usada), o (None, None)
-    si no hay absolutamente nada disponible en ninguna de las dos.
+    si no hay absolutamente nada disponible en ninguna categoría.
     """
     preferred = load_rotation_state()
-    other = [c for c in CATEGORIES if c != preferred][0] if len(CATEGORIES) > 1 else preferred
+    if preferred not in CATEGORIES:
+        preferred = CATEGORIES[0]
+    start_idx = CATEGORIES.index(preferred)
+    ordered_categories = [CATEGORIES[(start_idx + i) % len(CATEGORIES)] for i in range(len(CATEGORIES))]
 
-    for category in (preferred, other):
+    for category in ordered_categories:
         files = list_media_in_category(category)
         if force_video_only:
             files = [p for p in files if p.suffix.lower() in YOUTUBE_VIDEO_EXTS]
@@ -437,7 +443,7 @@ def main() -> int:
     save_posted_log(posted)
 
     # La próxima vez le toca a la otra categoría (alternancia).
-    next_category = [c for c in CATEGORIES if c != used_category][0] if len(CATEGORIES) > 1 else used_category
+    next_category = CATEGORIES[(CATEGORIES.index(used_category) + 1) % len(CATEGORIES)]
     save_rotation_state(next_category)
 
     return 0
