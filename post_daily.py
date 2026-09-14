@@ -192,7 +192,7 @@ CATEGORY_COOLDOWN_DAYS = {
 }
 
 
-def pick_next_file(posted: dict, force_video_only: bool = False) -> tuple[Path | None, str | None]:
+def pick_next_file(posted: dict, required_exts: set | None = None) -> tuple:
     """
     Elige un archivo siguiendo el ciclo fijo de CATEGORIES (en el orden
     de la lista, volviendo al inicio al llegar al final). Primero
@@ -201,9 +201,9 @@ def pick_next_file(posted: dict, force_video_only: bool = False) -> tuple[Path |
     la carpeta está vacía), cae de respaldo a la siguiente en el ciclo,
     y así sucesivamente, para no dejar de publicar.
 
-    Si force_video_only=True, solo se consideran archivos .mp4 (se usa
-    cuando toca el turno de subir a YouTube, para garantizar que el
-    archivo elegido sea compatible).
+    Si required_exts se indica, solo se consideran archivos con esa(s)
+    extensión(es) (se usa para forzar un tipo compatible con YouTube o
+    con la alternancia video/foto de TikTok).
 
     Devuelve (archivo_elegido, categoría_realmente_usada), o (None, None)
     si no hay absolutamente nada disponible en ninguna categoría.
@@ -216,8 +216,8 @@ def pick_next_file(posted: dict, force_video_only: bool = False) -> tuple[Path |
 
     for category in ordered_categories:
         files = list_media_in_category(category)
-        if force_video_only:
-            files = [p for p in files if p.suffix.lower() in YOUTUBE_VIDEO_EXTS]
+        if required_exts:
+            files = [p for p in files if p.suffix.lower() in required_exts]
 
         cooldown = CATEGORY_COOLDOWN_DAYS.get(category, REPEAT_COOLDOWN_DAYS)
 
@@ -358,9 +358,9 @@ def hours_since_last_youtube_upload(yt_log: dict) -> float:
 def maybe_upload_to_youtube(filepath: Path, category: str) -> None:
     """
     Sube a YouTube si: es un .mp4 (YouTube solo recibe ese formato aquí),
-    hay credenciales, esa categoría ('deltarune'/'shitpost') no llegó a
-    su cupo diario de YOUTUBE_DAILY_LIMIT_PER_CATEGORY, y ya pasaron al
-    menos YOUTUBE_MIN_HOURS_BETWEEN_UPLOADS horas desde la última subida
+    hay credenciales, esa categoría no llegó a su cupo diario de
+    YOUTUBE_DAILY_LIMIT_PER_CATEGORY, y ya pasaron al menos
+    YOUTUBE_MIN_HOURS_BETWEEN_UPLOADS horas desde la última subida
     (para repartirlas a lo largo del día en vez de subirlas todas seguidas).
     """
     if filepath.suffix.lower() not in YOUTUBE_VIDEO_EXTS:
@@ -398,7 +398,6 @@ def maybe_upload_to_youtube(filepath: Path, category: str) -> None:
         print(f"[WARN] Falló la subida a YouTube (no afecta al post de Twitter): {e}")
 
 
-
 def is_youtube_turn_due() -> bool:
     """
     True si: hay credenciales, ya pasaron las 4h desde la última subida,
@@ -426,22 +425,32 @@ def tiktok_credentials_available() -> bool:
 def load_tiktok_log() -> dict:
     """
     {'date': 'YYYY-MM-DD', 'counts': {'video': N, 'photo': N},
-     'last_upload_utc': ISO8601 o None}
+     'last_upload_utc': ISO8601 o None, 'next_type': 'video'|'photo'}
     """
     today = today_str()
     if TIKTOK_LOG_FILE.exists():
         try:
             with open(TIKTOK_LOG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            data.setdefault("next_type", "video")
             if data.get("date") == today:
                 data.setdefault("counts", {})
                 data["counts"].setdefault("video", 0)
                 data["counts"].setdefault("photo", 0)
                 data.setdefault("last_upload_utc", None)
                 return data
+            else:
+                # Nuevo día: se reinician los cupos pero se conserva next_type
+                # para no romper la alternancia justo al cruzar la medianoche.
+                return {
+                    "date": today,
+                    "counts": {"video": 0, "photo": 0},
+                    "last_upload_utc": data.get("last_upload_utc"),
+                    "next_type": data.get("next_type", "video"),
+                }
         except (json.JSONDecodeError, OSError):
             pass
-    return {"date": today, "counts": {"video": 0, "photo": 0}, "last_upload_utc": None}
+    return {"date": today, "counts": {"video": 0, "photo": 0}, "last_upload_utc": None, "next_type": "video"}
 
 
 def save_tiktok_log(data: dict) -> None:
@@ -458,6 +467,36 @@ def hours_since_last_tiktok_upload(tt_log: dict) -> float:
     except ValueError:
         return 9999
     return (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+
+
+def is_tiktok_turn_due() -> tuple:
+    """
+    Determina si toca publicar en TikTok ahora, y de qué TIPO (video o
+    foto) debe ser el archivo, siguiendo la alternancia video -> foto ->
+    video -> foto... Si el tipo que tocaría según la alternancia ya
+    llegó a su cupo diario, se intenta con el otro tipo en su lugar (sin
+    romper el reparto por completo).
+
+    Devuelve (debe_publicar: bool, tipo_requerido: 'video'|'photo'|None).
+    """
+    if not tiktok_credentials_available():
+        return False, None
+
+    tt_log = load_tiktok_log()
+    if hours_since_last_tiktok_upload(tt_log) < TIKTOK_MIN_HOURS_BETWEEN_UPLOADS:
+        return False, None
+
+    next_type = tt_log.get("next_type", "video")
+    limits = {"video": TIKTOK_DAILY_VIDEO_LIMIT, "photo": TIKTOK_DAILY_PHOTO_LIMIT}
+
+    if tt_log["counts"].get(next_type, 0) < limits[next_type]:
+        return True, next_type
+
+    other_type = "photo" if next_type == "video" else "video"
+    if tt_log["counts"].get(other_type, 0) < limits[other_type]:
+        return True, other_type
+
+    return False, None  # ambos tipos llegaron a su cupo diario
 
 
 def build_public_media_url(filepath: Path) -> str:
@@ -484,7 +523,7 @@ def build_public_media_url(filepath: Path) -> str:
     return f"https://raw.githubusercontent.com/{repo}/{branch}/{rel_path}"
 
 
-def get_tiktok_allowed_privacy_levels(account_id: str, api_key: str, media_type: str) -> list[str]:
+def get_tiktok_allowed_privacy_levels(account_id: str, api_key: str, media_type: str) -> list:
     """Consulta creator-info y devuelve los privacy_level permitidos para esta cuenta."""
     resp = requests.get(
         f"{ZERNIO_API_BASE}/accounts/{account_id}/tiktok/creator-info",
@@ -596,6 +635,9 @@ def maybe_upload_to_tiktok(filepath: Path, category: str) -> None:
     video/foto, o no haya pasado suficiente tiempo desde la última
     subida. Cualquier fallo se loguea pero NO hace fallar el resto del
     script (el tweet ya se publicó).
+
+    Al publicar con éxito, actualiza 'next_type' con el tipo OPUESTO al
+    que se acaba de publicar, para mantener la alternancia video/foto.
     """
     if not tiktok_credentials_available():
         print("[INFO] TikTok: faltan credenciales (ZERNIO_API_KEY / ZERNIO_TIKTOK_ACCOUNT_ID), se omite.")
@@ -626,6 +668,7 @@ def maybe_upload_to_tiktok(filepath: Path, category: str) -> None:
         print(f"[OK] Publicado en TikTok ({category}): {result}")
         tt_log["counts"][media_kind] = current_count + 1
         tt_log["last_upload_utc"] = datetime.now(timezone.utc).isoformat()
+        tt_log["next_type"] = "photo" if media_kind == "video" else "video"
         save_tiktok_log(tt_log)
     except Exception as e:
         print(f"[WARN] Falló la publicación en TikTok (no afecta al post de Twitter): {e}")
@@ -665,14 +708,37 @@ def main() -> int:
         return 0
 
     youtube_turn = is_youtube_turn_due()
-    if youtube_turn:
+    tiktok_turn, tiktok_required_type = is_tiktok_turn_due()
+
+    # Determinamos qué extensiones forzar este turno, combinando los
+    # requisitos de YouTube (siempre .mp4) y de la alternancia de TikTok
+    # (video o foto). Si ambos coinciden en pedir video, se combinan sin
+    # problema (mp4 cumple ambos). Si TikTok pide foto justo cuando
+    # también tocaba YouTube, priorizamos a TikTok esta vez -- YouTube
+    # simplemente no consume su turno (maybe_upload_to_youtube omite
+    # sin gastar el temporizador) y se retoma en el siguiente mp4.
+    required_exts = None
+    if tiktok_turn and tiktok_required_type == "photo":
+        required_exts = TIKTOK_IMAGE_EXTS
+        if youtube_turn:
+            print("[INFO] Toca YouTube y TikTok(foto) a la vez: se prioriza TikTok, "
+                  "YouTube se retoma en el próximo turno de video.")
+    elif tiktok_turn and tiktok_required_type == "video":
+        required_exts = (YOUTUBE_VIDEO_EXTS | TIKTOK_VIDEO_EXTS) if youtube_turn else TIKTOK_VIDEO_EXTS
+        required_exts = (YOUTUBE_VIDEO_EXTS & TIKTOK_VIDEO_EXTS) if youtube_turn else TIKTOK_VIDEO_EXTS
+        if youtube_turn:
+            print("[INFO] Toca YouTube y TikTok(video) a la vez: se fuerza un .mp4 que sirve para ambos.")
+        else:
+            print("[INFO] Toca turno de TikTok: se forzará elegir un video.")
+    elif youtube_turn:
+        required_exts = YOUTUBE_VIDEO_EXTS
         print("[INFO] Toca turno de YouTube: se forzará elegir un .mp4.")
 
-    next_file, used_category = pick_next_file(posted, force_video_only=youtube_turn)
-    if next_file is None and youtube_turn:
-        print("[INFO] No había ningún .mp4 disponible para el turno de YouTube, "
+    next_file, used_category = pick_next_file(posted, required_exts=required_exts)
+    if next_file is None and required_exts:
+        print("[INFO] No había ningún archivo del tipo requerido disponible, "
               "se elige contenido normal en su lugar.")
-        next_file, used_category = pick_next_file(posted, force_video_only=False)
+        next_file, used_category = pick_next_file(posted, required_exts=None)
     if next_file is None:
         print("No hay contenido disponible en ninguna categoría ahora mismo "
               "(cooldown activo o agotado). Nada que publicar.")
@@ -701,7 +767,7 @@ def main() -> int:
     posted[file_key(next_file)] = today
     save_posted_log(posted)
 
-    # La próxima vez le toca a la otra categoría (alternancia).
+    # La próxima vez le toca a la siguiente categoría del ciclo.
     next_category = CATEGORIES[(CATEGORIES.index(used_category) + 1) % len(CATEGORIES)]
     save_rotation_state(next_category)
 
