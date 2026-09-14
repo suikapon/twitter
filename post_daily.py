@@ -2,30 +2,34 @@
 """
 post_daily.py
 
-Publica automáticamente en X (Twitter) un archivo AL AZAR (imagen o video)
-de la carpeta `media/`, evitando repetir el mismo archivo el mismo día
-(UTC). Diseñado para correr cada 30 minutos vía GitHub Actions.
+Publica automáticamente en X (Twitter), a través de la API de Zernio, un
+archivo AL AZAR (imagen o video) de la carpeta `media/`, evitando repetir
+el mismo archivo el mismo día (UTC). Diseñado para correr cada 30 minutos
+vía GitHub Actions.
 
 Uso:
     python post_daily.py
 
 Requiere las siguientes variables de entorno:
-    TW_API_KEY
-    TW_API_SECRET
-    TW_ACCESS_TOKEN
-    TW_ACCESS_TOKEN_SECRET
+    ZERNIO_API_KEY
+    ZERNIO_TWITTER_ACCOUNT_ID
     (opcional) TWEET_TEXT_TEMPLATE  -> texto que acompaña al tweet,
         usando {filename} para insertar el nombre del archivo sin extensión
+
+La subida a YouTube (si está configurada) sigue usando la API de YouTube
+directamente, sin cambios.
 """
 
 import json
+import mimetypes
 import os
 import random
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import tweepy
+import requests
+from zernio import Zernio, ZernioAPIError
 
 MEDIA_DIR = Path("media")
 LOG_FILE = Path("posted_log.json")
@@ -41,7 +45,7 @@ VIDEO_EXTS = {
     ".mp4", ".mov", ".avi", ".wmv", ".flv", ".webm",
     ".mkv", ".m4v", ".3gp", ".3g2", ".mpg", ".mpeg", ".ts",
 }
-YOUTUBE_VIDEO_EXTS = {".mp4"}  # YouTube solo recibe mp4, aunque Twitter acepte más formatos
+YOUTUBE_VIDEO_EXTS = {".mp4"}  # YouTube solo recibe mp4, aunque Zernio/X acepten más formatos
 
 # Título fijo por categoría para los Shorts de YouTube (en vez de usar el
 # nombre del archivo, que suele ser un hash sin sentido).
@@ -193,41 +197,45 @@ def pick_next_file(posted: dict, force_video_only: bool = False) -> tuple[Path |
     return None, None
 
 
-def build_clients():
+def build_zernio_client() -> Zernio:
     """
-    tweepy.Client (API v2) se usa para crear el tweet.
-    tweepy.API (API v1.1) se sigue necesitando para subir media,
-    ya que la subida de media todavía no está 100% migrada a v2.
+    Crea el cliente de Zernio. Lee ZERNIO_API_KEY del entorno
+    automáticamente (no hace falta pasarla a mano).
     """
-    api_key = os.environ["TW_API_KEY"]
-    api_secret = os.environ["TW_API_SECRET"]
-    access_token = os.environ["TW_ACCESS_TOKEN"]
-    access_token_secret = os.environ["TW_ACCESS_TOKEN_SECRET"]
+    return Zernio()
 
-    auth = tweepy.OAuth1UserHandler(api_key, api_secret, access_token, access_token_secret)
-    api_v1 = tweepy.API(auth)
 
-    client_v2 = tweepy.Client(
-        consumer_key=api_key,
-        consumer_secret=api_secret,
-        access_token=access_token,
-        access_token_secret=access_token_secret,
+def upload_media_to_zernio(client: Zernio, filepath: Path) -> tuple[str, str]:
+    """
+    Sube un archivo a Zernio en dos pasos:
+      1. Pide una URL prefirmada (POST /v1/media/presign vía el SDK).
+      2. Sube el archivo directamente a esa URL con un PUT.
+
+    Devuelve (public_url, media_type) donde media_type es "image" o "video",
+    tal como lo espera el campo mediaItems de posts.create.
+    """
+    content_type, _ = mimetypes.guess_type(filepath.name)
+    if content_type is None:
+        content_type = "application/octet-stream"
+
+    presigned = client.media.get_presigned_url(
+        file_name=filepath.name,
+        file_type=content_type,
     )
-    return api_v1, client_v2
+    upload_url = presigned.upload_url
+    public_url = presigned.public_url
 
-
-def upload_media(api_v1: tweepy.API, filepath: Path) -> str:
-    is_video = filepath.suffix.lower() in VIDEO_EXTS
-    if is_video:
-        # "amplify_video" (en vez de "tweet_video") permite videos largos
-        # en cuentas Premium. chunked=True es obligatorio para archivos
-        # grandes.
-        media = api_v1.media_upload(
-            filename=str(filepath), chunked=True, media_category="amplify_video"
+    with open(filepath, "rb") as f:
+        put_response = requests.put(
+            upload_url,
+            data=f,
+            headers={"Content-Type": content_type},
+            timeout=120,
         )
-    else:
-        media = api_v1.media_upload(filename=str(filepath))
-    return media.media_id_string
+    put_response.raise_for_status()
+
+    media_type = "video" if filepath.suffix.lower() in VIDEO_EXTS else "image"
+    return public_url, media_type
 
 
 YOUTUBE_DAILY_LIMIT_PER_CATEGORY = 3
@@ -352,8 +360,7 @@ def maybe_upload_to_youtube(filepath: Path, category: str) -> None:
         yt_log["last_upload_utc"] = datetime.now(timezone.utc).isoformat()
         save_youtube_log(yt_log)
     except Exception as e:
-        print(f"[WARN] Falló la subida a YouTube (no afecta al post de Twitter): {e}")
-
+        print(f"[WARN] Falló la subida a YouTube (no afecta al post de X): {e}")
 
 
 def is_youtube_turn_due() -> bool:
@@ -378,7 +385,7 @@ def main() -> int:
         print(f"ERROR: no existe la carpeta '{MEDIA_DIR}'", file=sys.stderr)
         return 1
 
-    for var in ("TW_API_KEY", "TW_API_SECRET", "TW_ACCESS_TOKEN", "TW_ACCESS_TOKEN_SECRET"):
+    for var in ("ZERNIO_API_KEY", "ZERNIO_TWITTER_ACCOUNT_ID"):
         if not os.environ.get(var):
             print(f"ERROR: falta la variable de entorno {var}", file=sys.stderr)
             return 1
@@ -423,19 +430,28 @@ def main() -> int:
     print(f"[INFO] Publicando ({used_category}): {next_file}")
 
     try:
-        api_v1, client_v2 = build_clients()
-        media_id = upload_media(api_v1, next_file)
+        client = build_zernio_client()
+        public_url, media_type = upload_media_to_zernio(client, next_file)
 
         text_template = os.environ.get("TWEET_TEXT_TEMPLATE", "")
         tweet_text = text_template.format(filename=next_file.stem) if text_template else ""
 
-        response = client_v2.create_tweet(text=tweet_text, media_ids=[media_id])
-        print("[OK] Tweet publicado:", response.data)
+        account_id = os.environ["ZERNIO_TWITTER_ACCOUNT_ID"]
+        post = client.posts.create(
+            content=tweet_text,
+            media_items=[{"url": public_url, "type": media_type}],
+            platforms=[{"platform": "twitter", "accountId": account_id}],
+            publish_now=True,
+        )
+        print("[OK] Post publicado vía Zernio:", post["post"])
         maybe_upload_to_youtube(next_file, used_category)
-    except Exception as e:
+    except ZernioAPIError as e:
         # Si algo falla al publicar, NO marcamos el archivo como publicado,
         # para que el próximo intento (en 30 min) lo vuelva a probar.
-        print(f"ERROR al publicar el tweet: {e}", file=sys.stderr)
+        print(f"ERROR al publicar vía Zernio: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"ERROR inesperado al publicar: {e}", file=sys.stderr)
         return 1
 
     # Solo actualizamos el log si la publicación fue exitosa.
