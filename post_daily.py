@@ -16,6 +16,21 @@ Requiere las siguientes variables de entorno:
     TW_ACCESS_TOKEN_SECRET
     (opcional) TWEET_TEXT_TEMPLATE  -> texto que acompaña al tweet,
         usando {filename} para insertar el nombre del archivo sin extensión
+
+    (opcional, para subir también a YouTube Shorts)
+    YT_CLIENT_ID / YT_CLIENT_SECRET / YT_REFRESH_TOKEN
+
+    (opcional, para publicar también en TikTok vía la API de Zernio)
+    ZERNIO_API_KEY          -> API key de tu cuenta de Zernio
+    ZERNIO_TIKTOK_ACCOUNT_ID -> ID de la cuenta de TikTok ya conectada en Zernio
+    (opcional) TIKTOK_PRIVACY_LEVEL -> por defecto "PUBLIC_TO_EVERYONE"
+
+    NOTA IMPORTANTE sobre TikTok: Zernio/TikTok necesitan descargar el
+    archivo desde una URL pública (no se les puede mandar el archivo
+    directamente desde este script). Este script arma automáticamente
+    la URL pública de GitHub (raw.githubusercontent.com) a partir del
+    archivo ya commiteado en media/, lo cual SOLO funciona si el
+    repositorio es público.
 """
 
 import json
@@ -25,12 +40,14 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import requests
 import tweepy
 
 MEDIA_DIR = Path("media")
 LOG_FILE = Path("posted_log.json")
 ROTATION_FILE = Path("rotation_state.json")
 YOUTUBE_LOG_FILE = Path("youtube_log.json")
+TIKTOK_LOG_FILE = Path("tiktok_log.json")
 
 # Carpetas entre las que se alterna: una publicación de la primera,
 # luego una de la segunda, luego otra vez la primera, etc.
@@ -51,6 +68,32 @@ YOUTUBE_TITLES = {
     "touhou": "Touhou #shorts #touhou",
 }
 SUPPORTED_EXTS = IMAGE_EXTS | VIDEO_EXTS
+
+# --- TikTok (vía Zernio) -----------------------------------------------
+# Zernio expone la API de TikTok en https://zernio.com/api/v1
+ZERNIO_API_BASE = "https://zernio.com/api/v1"
+
+# Formatos que TikTok acepta a través de Zernio (subconjunto de los que
+# usamos para Twitter/YouTube).
+TIKTOK_VIDEO_EXTS = {".mp4", ".mov", ".webm"}
+TIKTOK_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}  # TikTok no acepta .gif
+
+TIKTOK_CAPTIONS = {
+    "deltarune": "Deltarune #deltarune #fyp",
+    "shitpost": "Shitpost #memes #fyp",
+    "touhou": "Touhou #touhou #fyp",
+}
+
+# Cada cuánto se permite subir a TikTok como mínimo (para no gastar de
+# golpe el cupo diario, ya que este script corre cada 45 min).
+TIKTOK_MIN_HOURS_BETWEEN_UPLOADS = 1.5
+
+# Cupos que Zernio aplica por defecto a cuentas de TikTok conectadas vía
+# TikTok for Business (ver doc: "Daily posting caps"). Se replican aquí
+# solo para repartir mejor las subidas a lo largo del día; si de todos
+# modos se supera el cupo real, Zernio simplemente encola el post.
+TIKTOK_DAILY_VIDEO_LIMIT = 15
+TIKTOK_DAILY_PHOTO_LIMIT = 15
 
 
 def today_str() -> str:
@@ -373,6 +416,221 @@ def is_youtube_turn_due() -> bool:
     )
 
 
+def tiktok_credentials_available() -> bool:
+    return all(
+        os.environ.get(var)
+        for var in ("ZERNIO_API_KEY", "ZERNIO_TIKTOK_ACCOUNT_ID")
+    )
+
+
+def load_tiktok_log() -> dict:
+    """
+    {'date': 'YYYY-MM-DD', 'counts': {'video': N, 'photo': N},
+     'last_upload_utc': ISO8601 o None}
+    """
+    today = today_str()
+    if TIKTOK_LOG_FILE.exists():
+        try:
+            with open(TIKTOK_LOG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("date") == today:
+                data.setdefault("counts", {})
+                data["counts"].setdefault("video", 0)
+                data["counts"].setdefault("photo", 0)
+                data.setdefault("last_upload_utc", None)
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"date": today, "counts": {"video": 0, "photo": 0}, "last_upload_utc": None}
+
+
+def save_tiktok_log(data: dict) -> None:
+    with open(TIKTOK_LOG_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def hours_since_last_tiktok_upload(tt_log: dict) -> float:
+    last = tt_log.get("last_upload_utc")
+    if not last:
+        return 9999  # nunca se subió nada -> se permite
+    try:
+        last_dt = datetime.fromisoformat(last)
+    except ValueError:
+        return 9999
+    return (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+
+
+def build_public_media_url(filepath: Path) -> str:
+    """
+    Construye la URL pública "raw" de GitHub del archivo. TikTok (a
+    través de Zernio) no acepta subida directa de bytes desde este
+    script: necesita descargar el media desde una URL pública, sin
+    autenticación (ver "Media URLs" en la doc de Zernio).
+
+    IMPORTANTE: esto solo funciona si el repositorio es público y el
+    archivo ya está commiteado en la rama actual (los archivos de
+    media/ ya lo están, porque se suben de antemano al repo).
+
+    GITHUB_REPOSITORY y GITHUB_REF_NAME los define automáticamente
+    GitHub Actions, no hace falta configurarlos a mano.
+    """
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    branch = os.environ.get("GITHUB_REF_NAME", "main")
+    if not repo:
+        raise RuntimeError(
+            "GITHUB_REPOSITORY no está definido (¿se está corriendo fuera de GitHub Actions?)"
+        )
+    rel_path = filepath.as_posix()
+    return f"https://raw.githubusercontent.com/{repo}/{branch}/{rel_path}"
+
+
+def get_tiktok_allowed_privacy_levels(account_id: str, api_key: str, media_type: str) -> list[str]:
+    """Consulta creator-info y devuelve los privacy_level permitidos para esta cuenta."""
+    resp = requests.get(
+        f"{ZERNIO_API_BASE}/accounts/{account_id}/tiktok/creator-info",
+        headers={"Authorization": f"Bearer {api_key}"},
+        params={"media_type": media_type},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return [lvl["value"] for lvl in data.get("privacyLevels", [])]
+
+
+def upload_to_tiktok(filepath: Path, category: str) -> str:
+    """
+    Publica el archivo en TikTok a través de la API de Zernio (POST
+    /v1/posts). Devuelve un string descriptivo del resultado.
+    Lanza una excepción si Zernio/TikTok rechaza la publicación.
+    """
+    api_key = os.environ["ZERNIO_API_KEY"]
+    account_id = os.environ["ZERNIO_TIKTOK_ACCOUNT_ID"]
+    privacy_level = os.environ.get("TIKTOK_PRIVACY_LEVEL", "PUBLIC_TO_EVERYONE")
+
+    ext = filepath.suffix.lower()
+    is_video = ext in TIKTOK_VIDEO_EXTS
+    is_image = ext in TIKTOK_IMAGE_EXTS
+    if not is_video and not is_image:
+        raise ValueError(f"Extensión '{ext}' no soportada por TikTok.")
+
+    media_url = build_public_media_url(filepath)
+    caption = TIKTOK_CAPTIONS.get(category, category)
+    media_type = "video" if is_video else "photo"
+
+    # Verificamos contra creator-info que el privacy_level elegido sea
+    # válido para esta cuenta; si no, usamos el primero que sí lo sea.
+    try:
+        allowed_levels = get_tiktok_allowed_privacy_levels(account_id, api_key, media_type)
+        if allowed_levels and privacy_level not in allowed_levels:
+            print(f"[WARN] TikTok: '{privacy_level}' no está disponible para esta cuenta, "
+                  f"se usa '{allowed_levels[0]}' en su lugar.")
+            privacy_level = allowed_levels[0]
+    except requests.RequestException as e:
+        print(f"[WARN] TikTok: no se pudo leer creator-info ({e}), se sigue con '{privacy_level}'.")
+
+    tiktok_settings = {
+        "privacy_level": privacy_level,
+        "allow_comment": True,
+        "content_preview_confirmed": True,
+        "express_consent_given": True,
+    }
+
+    if is_video:
+        media_items = [{"type": "video", "url": media_url}]
+        tiktok_settings["allow_duet"] = True
+        tiktok_settings["allow_stitch"] = True
+    else:
+        media_items = [{"type": "image", "url": media_url}]
+        tiktok_settings["media_type"] = "photo"
+        tiktok_settings["description"] = caption
+        tiktok_settings["auto_add_music"] = True
+
+    payload = {
+        "content": caption,
+        "mediaItems": media_items,
+        "platforms": [{"platform": "tiktok", "accountId": account_id}],
+        "tiktokSettings": tiktok_settings,
+        "publishNow": True,
+    }
+
+    resp = requests.post(
+        f"{ZERNIO_API_BASE}/posts",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=180,
+    )
+
+    try:
+        data = resp.json()
+    except ValueError:
+        resp.raise_for_status()
+        raise RuntimeError(
+            f"Respuesta inesperada de Zernio (status {resp.status_code}): {resp.text[:300]}"
+        )
+
+    # 200/201 = éxito total, 207 = éxito parcial (puede incluir un fallo
+    # puntual en la entrada de tiktok, se revisa abajo).
+    if resp.status_code not in (200, 201, 207):
+        raise RuntimeError(f"Zernio devolvió {resp.status_code}: {data}")
+
+    platforms = data.get("post", {}).get("platforms", [])
+    tiktok_entry = next((p for p in platforms if p.get("platform") == "tiktok"), None)
+    if tiktok_entry is None:
+        raise RuntimeError(f"Respuesta de Zernio sin entrada de tiktok: {data}")
+
+    status = tiktok_entry.get("status")
+    if status == "failed":
+        raise RuntimeError(tiktok_entry.get("errorMessage", "Fallo desconocido al publicar en TikTok"))
+
+    return f"{status} ({media_type})"
+
+
+def maybe_upload_to_tiktok(filepath: Path, category: str) -> None:
+    """
+    Publica en TikTok el mismo archivo que se acaba de publicar en
+    Twitter, salvo que: falten credenciales, el formato no sea
+    compatible con TikTok, ya se haya llegado al cupo diario de
+    video/foto, o no haya pasado suficiente tiempo desde la última
+    subida. Cualquier fallo se loguea pero NO hace fallar el resto del
+    script (el tweet ya se publicó).
+    """
+    if not tiktok_credentials_available():
+        print("[INFO] TikTok: faltan credenciales (ZERNIO_API_KEY / ZERNIO_TIKTOK_ACCOUNT_ID), se omite.")
+        return
+
+    ext = filepath.suffix.lower()
+    if ext not in TIKTOK_VIDEO_EXTS and ext not in TIKTOK_IMAGE_EXTS:
+        print(f"[INFO] TikTok: extensión '{ext}' no soportada, se omite.")
+        return
+
+    tt_log = load_tiktok_log()
+    media_kind = "video" if ext in TIKTOK_VIDEO_EXTS else "photo"
+    current_count = tt_log["counts"].get(media_kind, 0)
+    daily_limit = TIKTOK_DAILY_VIDEO_LIMIT if media_kind == "video" else TIKTOK_DAILY_PHOTO_LIMIT
+
+    if current_count >= daily_limit:
+        print(f"[INFO] TikTok: cupo diario de {media_kind} alcanzado ({current_count}/{daily_limit}), se omite.")
+        return
+
+    hours_since = hours_since_last_tiktok_upload(tt_log)
+    if hours_since < TIKTOK_MIN_HOURS_BETWEEN_UPLOADS:
+        faltan = TIKTOK_MIN_HOURS_BETWEEN_UPLOADS - hours_since
+        print(f"[INFO] TikTok: última subida hace {hours_since:.1f}h, faltan {faltan:.1f}h. Se omite por ahora.")
+        return
+
+    try:
+        result = upload_to_tiktok(filepath, category)
+        print(f"[OK] Publicado en TikTok ({category}): {result}")
+        tt_log["counts"][media_kind] = current_count + 1
+        tt_log["last_upload_utc"] = datetime.now(timezone.utc).isoformat()
+        save_tiktok_log(tt_log)
+    except Exception as e:
+        print(f"[WARN] Falló la publicación en TikTok (no afecta al post de Twitter): {e}")
+
+
 def main() -> int:
     if not MEDIA_DIR.exists():
         print(f"ERROR: no existe la carpeta '{MEDIA_DIR}'", file=sys.stderr)
@@ -432,6 +690,7 @@ def main() -> int:
         response = client_v2.create_tweet(text=tweet_text, media_ids=[media_id])
         print("[OK] Tweet publicado:", response.data)
         maybe_upload_to_youtube(next_file, used_category)
+        maybe_upload_to_tiktok(next_file, used_category)
     except Exception as e:
         # Si algo falla al publicar, NO marcamos el archivo como publicado,
         # para que el próximo intento (en 30 min) lo vuelva a probar.
