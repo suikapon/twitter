@@ -15,7 +15,7 @@ permissions:
 
 concurrency:
   group: daily-post
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   post:
@@ -86,7 +86,7 @@ jobs:
           done
 
       - name: Encadenar la siguiente ejecución (sin esperar al cron)
-        if: always()
+        if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
