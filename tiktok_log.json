@@ -1,9 +1,9 @@
 {
-  "date": "2026-09-14",
+  "date": "2026-09-15",
   "counts": {
-    "video": 2,
-    "photo": 4
+    "video": 1,
+    "photo": 0
   },
-  "last_upload_utc": "2026-09-14T23:45:38.013087+00:00",
-  "next_type": "video"
+  "last_upload_utc": "2026-09-15T01:16:09.353547+00:00",
+  "next_type": "photo"
 }
