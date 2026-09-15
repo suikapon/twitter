@@ -25,8 +25,12 @@ Requiere las siguientes variables de entorno:
     ZERNIO_TIKTOK_ACCOUNT_ID -> ID de la cuenta de TikTok ya conectada en Zernio
     (opcional) TIKTOK_PRIVACY_LEVEL -> por defecto "PUBLIC_TO_EVERYONE"
 
-    NOTA IMPORTANTE sobre TikTok: Zernio/TikTok necesitan descargar el
-    archivo desde una URL pública (no se les puede mandar el archivo
+    (opcional, para publicar también en Instagram vía la API de Zernio)
+    ZERNIO_API_KEY             -> misma API key de Zernio de arriba
+    ZERNIO_INSTAGRAM_ACCOUNT_ID -> ID de la cuenta de Instagram ya conectada en Zernio
+
+    NOTA IMPORTANTE sobre TikTok e Instagram: Zernio necesita descargar
+    el archivo desde una URL pública (no se le puede mandar el archivo
     directamente desde este script). Este script arma automáticamente
     la URL pública de GitHub (raw.githubusercontent.com) a partir del
     archivo ya commiteado en media/, lo cual SOLO funciona si el
@@ -48,6 +52,7 @@ LOG_FILE = Path("posted_log.json")
 ROTATION_FILE = Path("rotation_state.json")
 YOUTUBE_LOG_FILE = Path("youtube_log.json")
 TIKTOK_LOG_FILE = Path("tiktok_log.json")
+INSTAGRAM_LOG_FILE = Path("instagram_log.json")
 
 # Carpetas entre las que se alterna: una publicación de la primera,
 # luego una de la segunda, luego otra vez la primera, etc.
@@ -94,6 +99,28 @@ TIKTOK_MIN_HOURS_BETWEEN_UPLOADS = 1.5
 # modos se supera el cupo real, Zernio simplemente encola el post.
 TIKTOK_DAILY_VIDEO_LIMIT = 15
 TIKTOK_DAILY_PHOTO_LIMIT = 15
+
+# --- Instagram (vía Zernio) ---------------------------------------------
+# Un video sin "contentType" se publica como Reel; una imagen se publica
+# como post de feed (ver doc de Zernio, sección "Publish"). Instagram
+# solo acepta JPEG/PNG para imágenes y MP4/MOV para video, así que estos
+# subconjuntos son más chicos que los de Twitter (sin gif/webp/avi/etc.).
+INSTAGRAM_VIDEO_EXTS = {".mp4", ".mov"}
+INSTAGRAM_IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
+
+INSTAGRAM_CAPTIONS = {
+    "deltarune": "Deltarune #deltarune",
+    "shitpost": "Shitpost #memes",
+    "touhou": "Touhou #touhou",
+}
+
+# Cada cuánto se permite publicar en Instagram como mínimo.
+INSTAGRAM_MIN_HOURS_BETWEEN_UPLOADS = 1.5
+
+# Límite diario propio (muy por debajo del cupo real de Instagram, que
+# es 100 posts/24h de cualquier tipo combinado), solo para no gastarlo
+# todo de golpe.
+INSTAGRAM_DAILY_LIMIT = 20
 
 
 def today_str() -> str:
@@ -674,6 +701,158 @@ def maybe_upload_to_tiktok(filepath: Path, category: str) -> None:
         print(f"[WARN] Falló la publicación en TikTok (no afecta al post de Twitter): {e}")
 
 
+def instagram_credentials_available() -> bool:
+    return all(
+        os.environ.get(var)
+        for var in ("ZERNIO_API_KEY", "ZERNIO_INSTAGRAM_ACCOUNT_ID")
+    )
+
+
+def load_instagram_log() -> dict:
+    """
+    {'date': 'YYYY-MM-DD', 'count': N, 'last_upload_utc': ISO8601 o None}
+    """
+    today = today_str()
+    if INSTAGRAM_LOG_FILE.exists():
+        try:
+            with open(INSTAGRAM_LOG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("date") == today:
+                data.setdefault("count", 0)
+                data.setdefault("last_upload_utc", None)
+                return data
+            else:
+                return {
+                    "date": today,
+                    "count": 0,
+                    "last_upload_utc": data.get("last_upload_utc"),
+                }
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"date": today, "count": 0, "last_upload_utc": None}
+
+
+def save_instagram_log(data: dict) -> None:
+    with open(INSTAGRAM_LOG_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def hours_since_last_instagram_upload(ig_log: dict) -> float:
+    last = ig_log.get("last_upload_utc")
+    if not last:
+        return 9999  # nunca se subió nada -> se permite
+    try:
+        last_dt = datetime.fromisoformat(last)
+    except ValueError:
+        return 9999
+    return (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+
+
+def upload_to_instagram(filepath: Path, category: str) -> str:
+    """
+    Publica el archivo en Instagram a través de la API de Zernio (POST
+    /v1/posts). Un video se publica como Reel (sin "contentType"), una
+    imagen como post de feed. Devuelve un string descriptivo del
+    resultado. Lanza una excepción si Zernio/Instagram rechaza la
+    publicación.
+    """
+    api_key = os.environ["ZERNIO_API_KEY"]
+    account_id = os.environ["ZERNIO_INSTAGRAM_ACCOUNT_ID"]
+
+    ext = filepath.suffix.lower()
+    is_video = ext in INSTAGRAM_VIDEO_EXTS
+    is_image = ext in INSTAGRAM_IMAGE_EXTS
+    if not is_video and not is_image:
+        raise ValueError(f"Extensión '{ext}' no soportada por Instagram.")
+
+    media_url = build_public_media_url(filepath)
+    caption = INSTAGRAM_CAPTIONS.get(category, category)
+    media_type = "video" if is_video else "image"
+
+    payload = {
+        "content": caption,
+        "mediaItems": [{"type": media_type, "url": media_url}],
+        "platforms": [{"platform": "instagram", "accountId": account_id}],
+        "publishNow": True,
+    }
+
+    resp = requests.post(
+        f"{ZERNIO_API_BASE}/posts",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=180,
+    )
+
+    try:
+        data = resp.json()
+    except ValueError:
+        resp.raise_for_status()
+        raise RuntimeError(
+            f"Respuesta inesperada de Zernio (status {resp.status_code}): {resp.text[:300]}"
+        )
+
+    # 200/201 = éxito total, 207 = éxito parcial (puede incluir un fallo
+    # puntual en la entrada de instagram, se revisa abajo).
+    if resp.status_code not in (200, 201, 207):
+        raise RuntimeError(f"Zernio devolvió {resp.status_code}: {data}")
+
+    platforms = data.get("post", {}).get("platforms", [])
+    ig_entry = next((p for p in platforms if p.get("platform") == "instagram"), None)
+    if ig_entry is None:
+        raise RuntimeError(f"Respuesta de Zernio sin entrada de instagram: {data}")
+
+    status = ig_entry.get("status")
+    if status == "failed":
+        raise RuntimeError(ig_entry.get("errorMessage", "Fallo desconocido al publicar en Instagram"))
+
+    return f"{status} ({media_type})"
+
+
+def maybe_upload_to_instagram(filepath: Path, category: str) -> None:
+    """
+    Publica en Instagram el mismo archivo que se acaba de publicar en
+    Twitter, salvo que: falten credenciales, el formato no sea
+    compatible (Instagram solo acepta JPEG/PNG y MP4/MOV), ya se haya
+    llegado al cupo diario propio, o no haya pasado suficiente tiempo
+    desde la última publicación. Cualquier fallo se loguea pero NO hace
+    fallar el resto del script (el tweet ya se publicó).
+    """
+    if not instagram_credentials_available():
+        print("[INFO] Instagram: faltan credenciales (ZERNIO_API_KEY / "
+              "ZERNIO_INSTAGRAM_ACCOUNT_ID), se omite.")
+        return
+
+    ext = filepath.suffix.lower()
+    if ext not in INSTAGRAM_VIDEO_EXTS and ext not in INSTAGRAM_IMAGE_EXTS:
+        print(f"[INFO] Instagram: extensión '{ext}' no soportada, se omite.")
+        return
+
+    ig_log = load_instagram_log()
+    if ig_log["count"] >= INSTAGRAM_DAILY_LIMIT:
+        print(f"[INFO] Instagram: cupo diario alcanzado "
+              f"({ig_log['count']}/{INSTAGRAM_DAILY_LIMIT}), se omite.")
+        return
+
+    hours_since = hours_since_last_instagram_upload(ig_log)
+    if hours_since < INSTAGRAM_MIN_HOURS_BETWEEN_UPLOADS:
+        faltan = INSTAGRAM_MIN_HOURS_BETWEEN_UPLOADS - hours_since
+        print(f"[INFO] Instagram: última publicación hace {hours_since:.1f}h, "
+              f"faltan {faltan:.1f}h. Se omite por ahora.")
+        return
+
+    try:
+        result = upload_to_instagram(filepath, category)
+        print(f"[OK] Publicado en Instagram ({category}): {result}")
+        ig_log["count"] += 1
+        ig_log["last_upload_utc"] = datetime.now(timezone.utc).isoformat()
+        save_instagram_log(ig_log)
+    except Exception as e:
+        print(f"[WARN] Falló la publicación en Instagram (no afecta al post de Twitter): {e}")
+
+
 def main() -> int:
     if not MEDIA_DIR.exists():
         print(f"ERROR: no existe la carpeta '{MEDIA_DIR}'", file=sys.stderr)
@@ -757,6 +936,7 @@ def main() -> int:
         print("[OK] Tweet publicado:", response.data)
         maybe_upload_to_youtube(next_file, used_category)
         maybe_upload_to_tiktok(next_file, used_category)
+        maybe_upload_to_instagram(next_file, used_category)
     except Exception as e:
         # Si algo falla al publicar, NO marcamos el archivo como publicado,
         # para que el próximo intento (en 30 min) lo vuelva a probar.
