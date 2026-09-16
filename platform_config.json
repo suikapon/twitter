@@ -1,0 +1,26 @@
+{
+  "youtube": {
+    "daily_count": 6,
+    "weights": {
+      "deltarune": 50,
+      "touhou": 30,
+      "shitpost": 20
+    }
+  },
+  "tiktok": {
+    "daily_count": 10,
+    "weights": {
+      "deltarune": 50,
+      "touhou": 30,
+      "shitpost": 20
+    }
+  },
+  "instagram": {
+    "daily_count": 10,
+    "weights": {
+      "deltarune": 50,
+      "touhou": 30,
+      "shitpost": 20
+    }
+  }
+}
