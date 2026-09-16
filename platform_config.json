@@ -1,9 +1,9 @@
 {
   "twitter": {
-    "daily_count": 24
+    "daily_count": 16
   },
   "youtube": {
-    "daily_count": 6,
+    "daily_count": 3,
     "weights": {
       "deltarune": 50,
       "touhou": 30,
@@ -11,7 +11,7 @@
     }
   },
   "tiktok": {
-    "daily_count": 10,
+    "daily_count": 8,
     "weights": {
       "deltarune": 50,
       "touhou": 30,
@@ -19,7 +19,7 @@
     }
   },
   "instagram": {
-    "daily_count": 10,
+    "daily_count": 8,
     "weights": {
       "deltarune": 50,
       "touhou": 30,
