@@ -1,4 +1,7 @@
 {
+  "twitter": {
+    "daily_count": 24
+  },
   "youtube": {
     "daily_count": 6,
     "weights": {

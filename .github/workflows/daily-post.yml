@@ -15,7 +15,7 @@ permissions:
 
 concurrency:
   group: daily-post
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   post:
@@ -32,7 +32,7 @@ jobs:
       - name: Instalar dependencias
         run: pip install tweepy google-api-python-client google-auth-oauthlib google-auth-httplib2 requests
 
-      - name: Bucle de publicaciones cada 45 min
+      - name: Revisión periódica cada 15 min
         env:
           TW_API_KEY: ${{ secrets.TW_API_KEY }}
           TW_API_SECRET: ${{ secrets.TW_API_SECRET }}
@@ -50,10 +50,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # 8 publicaciones separadas por 45 min = ~5.25 horas cubiertas,
-          # dejando margen antes del límite de 6h de GitHub Actions.
-          for i in $(seq 1 8); do
-            echo "=== Publicación $i de 8 ==="
+          # El script decide él solo, cada 15 min, si le toca publicar en
+          # cada red (según platform_config.json). 20 revisiones = ~5h
+          # cubiertas, dejando margen antes del límite de 6h de GitHub Actions.
+          for i in $(seq 1 20); do
+            echo "=== Revisión $i de 20 ==="
 
             # Sincroniza con el remoto ANTES de decidir qué publicar,
             # para partir siempre del registro más actualizado y reducir
@@ -65,10 +66,10 @@ jobs:
               git reset --hard origin/main
             }
 
-            python post_daily.py || echo "Esta publicación falló, se continúa con la siguiente"
+            python post_daily.py || echo "Esta revisión falló, se continúa con la siguiente"
 
-            git add posted_log.json rotation_state.json youtube_log.json tiktok_log.json instagram_log.json 2>/dev/null || git add posted_log.json
-            git diff --staged --quiet || git commit -m "Actualiza registro de publicados ($i)"
+            git add posted_log.json rotation_state.json twitter_log.json youtube_log.json tiktok_log.json instagram_log.json 2>/dev/null || git add posted_log.json
+            git diff --staged --quiet || git commit -m "Actualiza registros ($i)"
 
             if ! git push; then
               echo "push falló, se reintenta una vez tras resincronizar"
@@ -77,17 +78,17 @@ jobs:
                 git checkout main 2>/dev/null || true
                 git reset --hard origin/main
               }
-              git push || echo "push volvió a fallar, se reintentará en la próxima publicación"
+              git push || echo "push volvió a fallar, se reintentará en la próxima revisión"
             fi
 
-            if [ "$i" -lt 8 ]; then
-              echo "Esperando 45 minutos..."
-              sleep 2700
+            if [ "$i" -lt 20 ]; then
+              echo "Esperando 15 minutos..."
+              sleep 900
             fi
           done
 
       - name: Encadenar la siguiente ejecución (sin esperar al cron)
-        if: success()
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

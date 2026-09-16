@@ -46,6 +46,7 @@ import tweepy
 MEDIA_DIR = Path("media")
 LOG_FILE = Path("posted_log.json")
 ROTATION_FILE = Path("rotation_state.json")
+TWITTER_LOG_FILE = Path("twitter_log.json")
 YOUTUBE_LOG_FILE = Path("youtube_log.json")
 TIKTOK_LOG_FILE = Path("tiktok_log.json")
 INSTAGRAM_LOG_FILE = Path("instagram_log.json")
@@ -215,6 +216,7 @@ def pick_next_file(posted: dict, required_exts: set | None = None) -> tuple:
 # ---------------------------------------------------------------------
 
 DEFAULT_PLATFORM_CONFIG = {
+    "twitter": {"daily_count": 32},
     "youtube": {"daily_count": 6, "weights": {c: 1 for c in CATEGORIES}},
     "tiktok": {"daily_count": 10, "weights": {c: 1 for c in CATEGORIES}},
     "instagram": {"daily_count": 10, "weights": {c: 1 for c in CATEGORIES}},
@@ -468,6 +470,23 @@ def spacing_hours_for(daily_count: int) -> float:
     return 24.0 / daily_count
 
 
+def is_twitter_due() -> tuple:
+    """
+    True si ya pasó el espaciado configurado para Twitter en
+    platform_config.json (clave 'twitter' -> 'daily_count'). Devuelve
+    (debe_publicar, log_actual) para que main() pueda reutilizar el log
+    ya cargado al guardar después.
+    """
+    config = load_platform_config().get("twitter", {})
+    daily_count = config.get("daily_count", 32)
+    tw_log = load_platform_log(TWITTER_LOG_FILE)
+    if tw_log["count"] >= daily_count:
+        return False, tw_log
+    min_hours = spacing_hours_for(daily_count)
+    hs = hours_since(tw_log.get("last_upload_utc"))
+    return hs >= min_hours, tw_log
+
+
 # ---------------------------------------------------------------------
 # TikTok
 # ---------------------------------------------------------------------
@@ -656,30 +675,43 @@ def main() -> int:
         print("No hay ningún archivo válido dentro de 'media/'. Nada que publicar.")
         return 0
 
-    # --- Twitter: ciclo fijo de categorías ---
-    next_file, used_category = pick_next_file(posted)
-    if next_file is None:
-        print("No hay contenido disponible en ninguna categoría ahora mismo. Nada que publicar.")
-        return 0
+    # --- Twitter: ciclo fijo de categorías, respetando el espaciado
+    # configurado en platform_config.json (clave "twitter" -> "daily_count") ---
+    twitter_due, tw_log = is_twitter_due()
+    if not twitter_due:
+        daily_count = load_platform_config().get("twitter", {}).get("daily_count", 32)
+        min_hours = spacing_hours_for(daily_count)
+        hs = hours_since(tw_log.get("last_upload_utc"))
+        if tw_log["count"] >= daily_count:
+            print(f"[INFO] Twitter: cupo diario alcanzado ({tw_log['count']}/{daily_count}).")
+        else:
+            print(f"[INFO] Twitter: última publicación hace {hs:.1f}h, "
+                  f"faltan {min_hours - hs:.1f}h (reparto para {daily_count}/día). Se omite por ahora.")
+    else:
+        next_file, used_category = pick_next_file(posted)
+        if next_file is None:
+            print("No hay contenido disponible en ninguna categoría ahora mismo para Twitter.")
+        else:
+            print(f"[INFO] Twitter publicando ({used_category}): {next_file}")
+            try:
+                api_v1, client_v2 = build_clients()
+                media_id = upload_media(api_v1, next_file)
+                text_template = os.environ.get("TWEET_TEXT_TEMPLATE", "")
+                tweet_text = text_template.format(filename=next_file.stem) if text_template else ""
+                response = client_v2.create_tweet(text=tweet_text, media_ids=[media_id])
+                print("[OK] Tweet publicado:", response.data)
 
-    print(f"[INFO] Twitter publicando ({used_category}): {next_file}")
+                posted[file_key(next_file)] = today_str()
+                save_posted_log(posted)
 
-    try:
-        api_v1, client_v2 = build_clients()
-        media_id = upload_media(api_v1, next_file)
-        text_template = os.environ.get("TWEET_TEXT_TEMPLATE", "")
-        tweet_text = text_template.format(filename=next_file.stem) if text_template else ""
-        response = client_v2.create_tweet(text=tweet_text, media_ids=[media_id])
-        print("[OK] Tweet publicado:", response.data)
-    except Exception as e:
-        print(f"ERROR al publicar el tweet: {e}", file=sys.stderr)
-        return 1
+                next_category = CATEGORIES[(CATEGORIES.index(used_category) + 1) % len(CATEGORIES)]
+                save_rotation_state(next_category)
 
-    posted[file_key(next_file)] = today_str()
-    save_posted_log(posted)
-
-    next_category = CATEGORIES[(CATEGORIES.index(used_category) + 1) % len(CATEGORIES)]
-    save_rotation_state(next_category)
+                tw_log["count"] += 1
+                tw_log["last_upload_utc"] = datetime.now(timezone.utc).isoformat()
+                save_platform_log(TWITTER_LOG_FILE, tw_log)
+            except Exception as e:
+                print(f"[WARN] Falló la publicación en Twitter: {e}")
 
     # --- YouTube, TikTok e Instagram: cada uno elige su propio
     # contenido, según su reparto configurado en platform_config.json
