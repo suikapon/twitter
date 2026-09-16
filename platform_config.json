@@ -1,29 +1,38 @@
 {
   "twitter": {
-    "daily_count": 16
-  },
-  "youtube": {
-    "daily_count": 3,
+    "daily_count": 24,
     "weights": {
       "deltarune": 50,
-      "touhou": 30,
-      "shitpost": 20
+      "touhou": 20,
+      "shitpost": 20,
+      "DarkOddCon": 10
+    }
+  },
+  "youtube": {
+    "daily_count": 6,
+    "weights": {
+      "deltarune": 50,
+      "touhou": 20,
+      "shitpost": 20,
+      "DarkOddCon": 10
     }
   },
   "tiktok": {
-    "daily_count": 8,
+    "daily_count": 10,
     "weights": {
       "deltarune": 50,
-      "touhou": 30,
-      "shitpost": 20
+      "touhou": 20,
+      "shitpost": 20,
+      "DarkOddCon": 10
     }
   },
   "instagram": {
-    "daily_count": 8,
+    "daily_count": 10,
     "weights": {
       "deltarune": 50,
-      "touhou": 30,
-      "shitpost": 20
+      "touhou": 20,
+      "shitpost": 20,
+      "DarkOddCon": 10
     }
   }
 }

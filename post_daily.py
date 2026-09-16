@@ -54,7 +54,7 @@ PLATFORM_CONFIG_FILE = Path("platform_config.json")
 
 # Ciclo fijo para Twitter: una publicación de la primera categoría,
 # luego la segunda, luego la tercera, y vuelta a empezar.
-CATEGORIES = ["deltarune", "shitpost", "touhou"]
+CATEGORIES = ["deltarune", "shitpost", "touhou", "DarkOddCon"]
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 VIDEO_EXTS = {
@@ -67,6 +67,7 @@ YOUTUBE_TITLES = {
     "deltarune": "Deltarune #shorts #deltarune",
     "shitpost": "Shitpost #shorts #memes",
     "touhou": "Touhou #shorts #touhou",
+    "DarkOddCon": "DarkOddCon #shorts",
 }
 SUPPORTED_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
@@ -83,11 +84,13 @@ TIKTOK_CAPTIONS = {
     "deltarune": "Deltarune #deltarune #fyp",
     "shitpost": "Shitpost #memes #fyp",
     "touhou": "Touhou #touhou #fyp",
+    "DarkOddCon": "DarkOddCon #fyp",
 }
 INSTAGRAM_CAPTIONS = {
     "deltarune": "Deltarune #deltarune",
     "shitpost": "Shitpost #memes",
     "touhou": "Touhou #touhou",
+    "DarkOddCon": "DarkOddCon",
 }
 
 
@@ -176,6 +179,7 @@ CATEGORY_COOLDOWN_DAYS = {
     "deltarune": 30,
     "shitpost": None,
     "touhou": 30,
+    "DarkOddCon": 30,
 }
 
 
@@ -669,7 +673,8 @@ def main() -> int:
         else:
             disponibles = sum(1 for p in cat_files if days_since(posted.get(file_key(p), "2000-01-01")) >= cooldown)
             print(f"[INFO]   - {cat}/: {len(cat_files)} archivo(s), {disponibles} disponible(s) (cooldown {cooldown} días)")
-    print(f"[INFO] Le toca a Twitter la categoría: {load_rotation_state()}")
+    twitter_weights_preview = load_platform_config().get("twitter", {}).get("weights", {c: 1 for c in CATEGORIES})
+    print(f"[INFO] Pesos de Twitter: {twitter_weights_preview}")
 
     if not all_files:
         print("No hay ningún archivo válido dentro de 'media/'. Nada que publicar.")
@@ -688,7 +693,8 @@ def main() -> int:
             print(f"[INFO] Twitter: última publicación hace {hs:.1f}h, "
                   f"faltan {min_hours - hs:.1f}h (reparto para {daily_count}/día). Se omite por ahora.")
     else:
-        next_file, used_category = pick_next_file(posted)
+        twitter_weights = load_platform_config().get("twitter", {}).get("weights", {c: 1 for c in CATEGORIES})
+        next_file, used_category = pick_file_for_platform(posted, twitter_weights, None)
         if next_file is None:
             print("No hay contenido disponible en ninguna categoría ahora mismo para Twitter.")
         else:
@@ -704,8 +710,8 @@ def main() -> int:
                 posted[file_key(next_file)] = today_str()
                 save_posted_log(posted)
 
-                next_category = CATEGORIES[(CATEGORIES.index(used_category) + 1) % len(CATEGORIES)]
-                save_rotation_state(next_category)
+                # Ya no se usa ciclo fijo (round-robin) para Twitter -- ahora
+                # la categoría se sortea por peso, igual que las demás redes.
 
                 tw_log["count"] += 1
                 tw_log["last_upload_utc"] = datetime.now(timezone.utc).isoformat()
