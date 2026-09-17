@@ -2,10 +2,10 @@
   "twitter": {
     "daily_count": 16,
     "weights": {
-      "deltarune": 40,
-      "touhou": 10,
-      "shitpost": 30,
-      "DarkOddCon": 10
+      "deltarune": 35,
+      "touhou": 15,
+      "shitpost": 35,
+      "DarkOddCon": 15
     }
   },
   "youtube": {
