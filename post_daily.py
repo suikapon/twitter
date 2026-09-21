@@ -51,6 +51,8 @@ YOUTUBE_LOG_FILE = Path("youtube_log.json")
 TIKTOK_LOG_FILE = Path("tiktok_log.json")
 INSTAGRAM_LOG_FILE = Path("instagram_log.json")
 PLATFORM_CONFIG_FILE = Path("platform_config.json")
+HIT_POSTS_FILE = Path("hit_posts.json")
+HIT_LOG_FILE = Path("hit_log.json")
 
 # Ciclo fijo para Twitter: una publicación de la primera categoría,
 # luego la segunda, luego la tercera, y vuelta a empezar.
@@ -274,7 +276,121 @@ def pick_file_for_platform(posted: dict, weights: dict, allowed_exts: set) -> tu
     return None, None
 
 
-def build_clients():
+# ---------------------------------------------------------------------
+# Tweets con texto propio (hit_posts.json)
+# ---------------------------------------------------------------------
+# Formato de hit_posts.json: una lista de entradas
+#   {"image": "media/hit/algo.jpg", "text": "..."}   -> con imagen
+#   {"image": null, "text": "..."}                    -> solo texto
+# Cada entrada se publica como máximo UNA vez (se registra en
+# hit_log.json). Para agregar más, solo edita hit_posts.json.
+
+def load_hit_posts() -> list:
+    if not HIT_POSTS_FILE.exists():
+        return []
+    try:
+        with open(HIT_POSTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[WARN] No se pudo leer {HIT_POSTS_FILE} ({e}).")
+        return []
+
+
+def load_hit_log() -> dict:
+    if HIT_LOG_FILE.exists():
+        try:
+            with open(HIT_LOG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data.setdefault("used_indices", [])
+            return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"used_indices": []}
+
+
+def save_hit_log(data: dict) -> None:
+    with open(HIT_LOG_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def pick_hit_entry() -> tuple:
+    """
+    Elige al azar una entrada no usada de hit_posts.json. Devuelve
+    (índice, entrada) o (None, None) si no queda ninguna disponible.
+    """
+    entries = load_hit_posts()
+    if not entries:
+        return None, None
+    log = load_hit_log()
+    used = set(log.get("used_indices", []))
+    available = [i for i in range(len(entries)) if i not in used]
+    if not available:
+        return None, None
+    idx = random.choice(available)
+    return idx, entries[idx]
+
+
+def mark_hit_entry_used(idx: int) -> None:
+    log = load_hit_log()
+    used = set(log.get("used_indices", []))
+    used.add(idx)
+    log["used_indices"] = sorted(used)
+    save_hit_log(log)
+
+
+def pick_twitter_content(posted: dict, weights: dict, force_video: bool = False) -> dict | None:
+    """
+    Elige qué publicar en Twitter esta vez, sorteando por peso entre las
+    categorías normales y, si "hit" está en los pesos, también entre los
+    tweets con texto propio de hit_posts.json.
+
+    Si force_video=True (2 imágenes seguidas ya publicadas), se excluyen
+    las imágenes normales de la selección -- "hit" solo se considera si
+    su entrada trae video o no trae imagen (texto solo), nunca imagen.
+
+    Devuelve un dict {"text": str, "image_path": Path|None,
+    "category": str, "hit_index": int|None}, o None si no hay nada
+    disponible en absoluto.
+    """
+    remaining = dict(weights)
+    while remaining:
+        category = weighted_pick_category(remaining)
+
+        if category == "hit":
+            idx, entry = pick_hit_entry()
+            if entry is not None:
+                image_path = None
+                if entry.get("image"):
+                    candidate = Path(entry["image"])
+                    is_img = candidate.suffix.lower() in IMAGE_EXTS
+                    if force_video and is_img:
+                        # Esta entrada de "hit" trae imagen, pero toca forzar
+                        # video -- se descarta esta entrada por ahora, se
+                        # intenta con otra categoría en su lugar.
+                        del remaining["hit"]
+                        continue
+                    image_path = candidate
+                return {
+                    "text": entry.get("text", ""),
+                    "image_path": image_path,
+                    "category": "hit",
+                    "hit_index": idx,
+                }
+            del remaining["hit"]
+            continue
+
+        allowed_exts = VIDEO_EXTS if force_video else None
+        candidates = available_in_category(category, posted, allowed_exts)
+        if candidates:
+            chosen = random.choice(candidates)
+            return {"text": "", "image_path": chosen, "category": category, "hit_index": None}
+        del remaining[category]
+
+    return None
+
+
+
     api_key = os.environ["TW_API_KEY"]
     api_secret = os.environ["TW_API_SECRET"]
     access_token = os.environ["TW_ACCESS_TOKEN"]
@@ -474,6 +590,25 @@ def spacing_hours_for(daily_count: int) -> float:
     return 24.0 / daily_count
 
 
+def load_twitter_log() -> dict:
+    """
+    Igual que load_platform_log(TWITTER_LOG_FILE), pero conservando
+    'recent_types' (los últimos tipos publicados: 'image'/'video') aunque
+    cambie el día -- esa memoria no debe reiniciarse a medianoche.
+    """
+    data = load_platform_log(TWITTER_LOG_FILE)
+    raw_recent = []
+    if TWITTER_LOG_FILE.exists():
+        try:
+            with open(TWITTER_LOG_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            raw_recent = raw.get("recent_types", [])
+        except (json.JSONDecodeError, OSError):
+            pass
+    data["recent_types"] = raw_recent[-2:]
+    return data
+
+
 def is_twitter_due() -> tuple:
     """
     True si ya pasó el espaciado configurado para Twitter en
@@ -483,7 +618,7 @@ def is_twitter_due() -> tuple:
     """
     config = load_platform_config().get("twitter", {})
     daily_count = config.get("daily_count", 32)
-    tw_log = load_platform_log(TWITTER_LOG_FILE)
+    tw_log = load_twitter_log()
     if tw_log["count"] >= daily_count:
         return False, tw_log
     min_hours = spacing_hours_for(daily_count)
@@ -694,25 +829,51 @@ def main() -> int:
                   f"faltan {min_hours - hs:.1f}h (reparto para {daily_count}/día). Se omite por ahora.")
     else:
         twitter_weights = load_platform_config().get("twitter", {}).get("weights", {c: 1 for c in CATEGORIES})
-        next_file, used_category = pick_file_for_platform(posted, twitter_weights, None)
-        if next_file is None:
+        recent_types = tw_log.get("recent_types", [])
+        force_video = recent_types[-2:] == ["image", "image"]
+        if force_video:
+            print("[INFO] Twitter: las últimas 2 publicaciones fueron imágenes, se fuerza un video.")
+
+        result = pick_twitter_content(posted, twitter_weights, force_video=force_video)
+        if result is None and force_video:
+            print("[INFO] Twitter: no había ningún video disponible, se elige contenido normal en su lugar.")
+            result = pick_twitter_content(posted, twitter_weights, force_video=False)
+
+        if result is None:
             print("No hay contenido disponible en ninguna categoría ahora mismo para Twitter.")
         else:
-            print(f"[INFO] Twitter publicando ({used_category}): {next_file}")
+            image_path = result["image_path"]
+            category = result["category"]
+            hit_index = result["hit_index"]
+
+            if category == "hit":
+                tweet_text = result["text"]
+                print(f"[INFO] Twitter publicando (hit #{hit_index}): {image_path or '(solo texto)'}")
+            else:
+                text_template = os.environ.get("TWEET_TEXT_TEMPLATE", "")
+                tweet_text = text_template.format(filename=image_path.stem) if text_template else ""
+                print(f"[INFO] Twitter publicando ({category}): {image_path}")
+
             try:
                 api_v1, client_v2 = build_clients()
-                media_id = upload_media(api_v1, next_file)
-                text_template = os.environ.get("TWEET_TEXT_TEMPLATE", "")
-                tweet_text = text_template.format(filename=next_file.stem) if text_template else ""
-                response = client_v2.create_tweet(text=tweet_text, media_ids=[media_id])
+                media_ids = None
+                if image_path is not None:
+                    media_id = upload_media(api_v1, image_path)
+                    media_ids = [media_id]
+
+                response = client_v2.create_tweet(text=tweet_text, media_ids=media_ids)
                 print("[OK] Tweet publicado:", response.data)
 
-                posted[file_key(next_file)] = today_str()
-                save_posted_log(posted)
+                if category == "hit":
+                    mark_hit_entry_used(hit_index)
+                    this_type = "image" if (image_path and image_path.suffix.lower() in IMAGE_EXTS) else "video"
+                else:
+                    posted[file_key(image_path)] = today_str()
+                    save_posted_log(posted)
+                    this_type = "image" if image_path.suffix.lower() in IMAGE_EXTS else "video"
 
-                # Ya no se usa ciclo fijo (round-robin) para Twitter -- ahora
-                # la categoría se sortea por peso, igual que las demás redes.
-
+                recent_types.append(this_type)
+                tw_log["recent_types"] = recent_types[-2:]
                 tw_log["count"] += 1
                 tw_log["last_upload_utc"] = datetime.now(timezone.utc).isoformat()
                 save_platform_log(TWITTER_LOG_FILE, tw_log)

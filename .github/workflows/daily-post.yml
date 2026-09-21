@@ -68,7 +68,7 @@ jobs:
 
             python post_daily.py || echo "Esta revisión falló, se continúa con la siguiente"
 
-            git add posted_log.json rotation_state.json twitter_log.json youtube_log.json tiktok_log.json instagram_log.json 2>/dev/null || git add posted_log.json
+            git add posted_log.json rotation_state.json twitter_log.json youtube_log.json tiktok_log.json instagram_log.json hit_log.json 2>/dev/null || git add posted_log.json
             git diff --staged --quiet || git commit -m "Actualiza registros ($i)"
 
             if ! git push; then
