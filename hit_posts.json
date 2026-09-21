@@ -60,7 +60,32 @@
     "text": "?????????"
   },
   {
-    "image": "media/hit/titanes.jpeg",
+    "image": "media/hit/wasap.jpeg",
+    "text": ""
+  },
+  {
+    "images": [
+      "media/hit/carnet1.png",
+      "media/hit/carnet2.png",
+      "media/hit/carnet3.png",
+      "media/hit/carnet4.png"
+    ],
+    "text": "esto qué fue tú"
+  },
+  {
+    "image": "media/hit/conejo.png",
+    "text": ""
+  },
+  {
+    "image": "media/hit/vaper.jpeg",
+    "text": "si vas a fumar al menos hazlo bien"
+  },
+  {
+    "image": "media/hit/papa.png",
+    "text": "pero papá"
+  },
+  {
+    "image": "media/hit/chupetin.png",
     "text": ""
   }
 ]

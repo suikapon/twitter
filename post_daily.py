@@ -345,11 +345,15 @@ def pick_twitter_content(posted: dict, weights: dict, force_video: bool = False)
     categorías normales y, si "hit" está en los pesos, también entre los
     tweets con texto propio de hit_posts.json.
 
-    Si force_video=True (2 imágenes seguidas ya publicadas), se excluyen
-    las imágenes normales de la selección -- "hit" solo se considera si
-    su entrada trae video o no trae imagen (texto solo), nunca imagen.
+    hit_posts.json admite "image" (una sola, string o null) o "images"
+    (lista de 2 a 4, todas imágenes -- Twitter no permite mezclar video
+    con varias imágenes en el mismo tweet).
 
-    Devuelve un dict {"text": str, "image_path": Path|None,
+    Si force_video=True (2 imágenes seguidas ya publicadas), se excluyen
+    las entradas de imagen(es) -- "hit" solo se considera si trae video
+    único o no trae imagen (texto solo).
+
+    Devuelve un dict {"text": str, "image_paths": list[Path],
     "category": str, "hit_index": int|None}, o None si no hay nada
     disponible en absoluto.
     """
@@ -360,20 +364,32 @@ def pick_twitter_content(posted: dict, weights: dict, force_video: bool = False)
         if category == "hit":
             idx, entry = pick_hit_entry()
             if entry is not None:
-                image_path = None
-                if entry.get("image"):
+                image_paths: list = []
+
+                if entry.get("images"):
+                    raw_paths = [Path(p) for p in entry["images"]]
+                    if not (2 <= len(raw_paths) <= 4) or any(p.suffix.lower() not in IMAGE_EXTS for p in raw_paths):
+                        print(f"[WARN] hit #{idx}: 'images' debe tener 2-4 rutas, todas de imagen. Se omite esta entrada.")
+                        del remaining["hit"]
+                        continue
+                    if force_video:
+                        # Son varias imágenes -- no sirve para forzar video, se prueba otra categoría.
+                        del remaining["hit"]
+                        continue
+                    image_paths = raw_paths
+
+                elif entry.get("image"):
                     candidate = Path(entry["image"])
                     is_img = candidate.suffix.lower() in IMAGE_EXTS
                     if force_video and is_img:
-                        # Esta entrada de "hit" trae imagen, pero toca forzar
-                        # video -- se descarta esta entrada por ahora, se
-                        # intenta con otra categoría en su lugar.
                         del remaining["hit"]
                         continue
-                    image_path = candidate
+                    image_paths = [candidate]
+
+                # Si no trae "images" ni "image", es un tweet de solo texto (image_paths queda vacío).
                 return {
                     "text": entry.get("text", ""),
-                    "image_path": image_path,
+                    "image_paths": image_paths,
                     "category": "hit",
                     "hit_index": idx,
                 }
@@ -384,7 +400,7 @@ def pick_twitter_content(posted: dict, weights: dict, force_video: bool = False)
         candidates = available_in_category(category, posted, allowed_exts)
         if candidates:
             chosen = random.choice(candidates)
-            return {"text": "", "image_path": chosen, "category": category, "hit_index": None}
+            return {"text": "", "image_paths": [chosen], "category": category, "hit_index": None}
         del remaining[category]
 
     return None
@@ -842,38 +858,44 @@ def main() -> int:
         if result is None:
             print("No hay contenido disponible en ninguna categoría ahora mismo para Twitter.")
         else:
-            image_path = result["image_path"]
+            image_paths = result["image_paths"]
             category = result["category"]
             hit_index = result["hit_index"]
 
             if category == "hit":
                 tweet_text = result["text"]
-                print(f"[INFO] Twitter publicando (hit #{hit_index}): {image_path or '(solo texto)'}")
+                desc = ", ".join(str(p) for p in image_paths) if image_paths else "(solo texto)"
+                print(f"[INFO] Twitter publicando (hit #{hit_index}): {desc}")
             else:
                 text_template = os.environ.get("TWEET_TEXT_TEMPLATE", "")
-                tweet_text = text_template.format(filename=image_path.stem) if text_template else ""
-                print(f"[INFO] Twitter publicando ({category}): {image_path}")
+                tweet_text = text_template.format(filename=image_paths[0].stem) if text_template else ""
+                print(f"[INFO] Twitter publicando ({category}): {image_paths[0]}")
 
             try:
                 api_v1, client_v2 = build_clients()
                 media_ids = None
-                if image_path is not None:
-                    media_id = upload_media(api_v1, image_path)
-                    media_ids = [media_id]
+                if image_paths:
+                    media_ids = [upload_media(api_v1, p) for p in image_paths]
 
                 response = client_v2.create_tweet(text=tweet_text, media_ids=media_ids)
                 print("[OK] Tweet publicado:", response.data)
 
                 if category == "hit":
                     mark_hit_entry_used(hit_index)
-                    this_type = "image" if (image_path and image_path.suffix.lower() in IMAGE_EXTS) else "video"
+                    if len(image_paths) > 1:
+                        this_type = "image"  # varias imágenes -> cuenta como imagen para la regla de 2 seguidas
+                    elif len(image_paths) == 1:
+                        this_type = "image" if image_paths[0].suffix.lower() in IMAGE_EXTS else "video"
+                    else:
+                        this_type = None  # tweet de solo texto, no cuenta para la regla
                 else:
-                    posted[file_key(image_path)] = today_str()
+                    posted[file_key(image_paths[0])] = today_str()
                     save_posted_log(posted)
-                    this_type = "image" if image_path.suffix.lower() in IMAGE_EXTS else "video"
+                    this_type = "image" if image_paths[0].suffix.lower() in IMAGE_EXTS else "video"
 
-                recent_types.append(this_type)
-                tw_log["recent_types"] = recent_types[-2:]
+                if this_type is not None:
+                    recent_types.append(this_type)
+                    tw_log["recent_types"] = recent_types[-2:]
                 tw_log["count"] += 1
                 tw_log["last_upload_utc"] = datetime.now(timezone.utc).isoformat()
                 save_platform_log(TWITTER_LOG_FILE, tw_log)
