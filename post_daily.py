@@ -56,7 +56,7 @@ HIT_LOG_FILE = Path("hit_log.json")
 
 # Ciclo fijo para Twitter: una publicación de la primera categoría,
 # luego la segunda, luego la tercera, y vuelta a empezar.
-CATEGORIES = ["deltarune", "shitpost", "touhou", "DarkOddCon"]
+CATEGORIES = ["deltarune", "shitpost", "touhou", "DarkOddCon", "capturas"]
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 VIDEO_EXTS = {
@@ -70,6 +70,7 @@ YOUTUBE_TITLES = {
     "shitpost": "Shitpost #shorts #memes",
     "touhou": "Touhou #shorts #touhou",
     "DarkOddCon": "DarkOddCon #shorts",
+    "capturas": "Capturas #shorts",
 }
 SUPPORTED_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
@@ -87,12 +88,14 @@ TIKTOK_CAPTIONS = {
     "shitpost": "Shitpost #memes #fyp",
     "touhou": "Touhou #touhou #fyp",
     "DarkOddCon": "DarkOddCon #fyp",
+    "capturas": "Capturas #fyp",
 }
 INSTAGRAM_CAPTIONS = {
     "deltarune": "Deltarune #deltarune",
     "shitpost": "Shitpost #memes",
     "touhou": "Touhou #touhou",
     "DarkOddCon": "DarkOddCon",
+    "capturas": "Capturas",
 }
 
 
@@ -182,6 +185,7 @@ CATEGORY_COOLDOWN_DAYS = {
     "shitpost": None,
     "touhou": 30,
     "DarkOddCon": 30,
+    "capturas": 30,
 }
 
 
@@ -406,7 +410,7 @@ def pick_twitter_content(posted: dict, weights: dict, force_video: bool = False)
     return None
 
 
-def build_clients() -> tuple:
+
     api_key = os.environ["TW_API_KEY"]
     api_secret = os.environ["TW_API_SECRET"]
     access_token = os.environ["TW_ACCESS_TOKEN"]
