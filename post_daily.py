@@ -410,7 +410,7 @@ def pick_twitter_content(posted: dict, weights: dict, force_video: bool = False)
     return None
 
 
-
+def build_clients():
     api_key = os.environ["TW_API_KEY"]
     api_secret = os.environ["TW_API_SECRET"]
     access_token = os.environ["TW_ACCESS_TOKEN"]
