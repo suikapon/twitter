@@ -188,6 +188,10 @@ CATEGORY_COOLDOWN_DAYS = {
     "capturas": 30,
 }
 
+# Cooldown de los tweets con texto propio (hit_posts.json): pasado este
+# número de días (UTC) la entrada puede volver a publicarse.
+HIT_COOLDOWN_DAYS = 1
+
 
 def available_in_category(category: str, posted: dict, allowed_exts: set | None = None) -> list:
     """Archivos de una categoría que respetan su cooldown (y opcionalmente una extensión)."""
@@ -286,8 +290,10 @@ def pick_file_for_platform(posted: dict, weights: dict, allowed_exts: set) -> tu
 # Formato de hit_posts.json: una lista de entradas
 #   {"image": "media/hit/algo.jpg", "text": "..."}   -> con imagen
 #   {"image": null, "text": "..."}                    -> solo texto
-# Cada entrada se publica como máximo UNA vez (se registra en
-# hit_log.json). Para agregar más, solo edita hit_posts.json.
+# Cada entrada puede volver a publicarse una vez pasado HIT_COOLDOWN_DAYS
+# (se registra la fecha de la última publicación en hit_log.json).
+# Para agregar más, solo edita hit_posts.json (siempre al final de la
+# lista, porque el registro se guarda por posición).
 
 def load_hit_posts() -> list:
     if not HIT_POSTS_FILE.exists():
@@ -302,15 +308,22 @@ def load_hit_posts() -> list:
 
 
 def load_hit_log() -> dict:
+    """
+    {"last_used": {"<índice>": "YYYY-MM-DD"}} con la fecha (UTC) de la
+    última vez que se publicó cada entrada de hit_posts.json.
+    (El formato viejo "used_indices" se ignora: esas entradas quedan
+    disponibles de inmediato.)
+    """
     if HIT_LOG_FILE.exists():
         try:
             with open(HIT_LOG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            data.setdefault("used_indices", [])
+            if not isinstance(data.get("last_used"), dict):
+                data["last_used"] = {}
             return data
         except (json.JSONDecodeError, OSError):
             pass
-    return {"used_indices": []}
+    return {"last_used": {}}
 
 
 def save_hit_log(data: dict) -> None:
@@ -320,15 +333,18 @@ def save_hit_log(data: dict) -> None:
 
 def pick_hit_entry() -> tuple:
     """
-    Elige al azar una entrada no usada de hit_posts.json. Devuelve
-    (índice, entrada) o (None, None) si no queda ninguna disponible.
+    Elige al azar una entrada de hit_posts.json que ya haya cumplido su
+    cooldown (HIT_COOLDOWN_DAYS). Devuelve (índice, entrada) o
+    (None, None) si no queda ninguna disponible.
     """
     entries = load_hit_posts()
     if not entries:
         return None, None
-    log = load_hit_log()
-    used = set(log.get("used_indices", []))
-    available = [i for i in range(len(entries)) if i not in used]
+    last_used = load_hit_log()["last_used"]
+    available = [
+        i for i in range(len(entries))
+        if days_since(last_used.get(str(i), "2000-01-01")) >= HIT_COOLDOWN_DAYS
+    ]
     if not available:
         return None, None
     idx = random.choice(available)
@@ -337,9 +353,7 @@ def pick_hit_entry() -> tuple:
 
 def mark_hit_entry_used(idx: int) -> None:
     log = load_hit_log()
-    used = set(log.get("used_indices", []))
-    used.add(idx)
-    log["used_indices"] = sorted(used)
+    log["last_used"][str(idx)] = today_str()
     save_hit_log(log)
 
 
